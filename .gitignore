@@ -1,4 +1,6 @@
 .env
+.token.json
+.claude/
 __pycache__/
 *.py[cod]
 *.pyc

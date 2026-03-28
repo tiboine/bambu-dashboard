@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="no">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Printerstatistikk – Makerspace Ringebu</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Jura:wght@400;600;800&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --orange: #d96c00;
+      --dark: #1a1b1f;
+      --gray: #f1f1f3;
+      --mid: #e0e0e3;
+      --white: #ffffff;
+      --green: #2ecc71;
+      --red: #e74c3c;
+      --card-bg: #ffffff;
+      --body-bg: #f1f1f3;
+      --text: #1a1b1f;
+      --text-muted: #888;
+      --text-faint: #bbb;
+      --header-bg: #1a1b1f;
+      --shadow: rgba(0,0,0,.08);
+    }
+
+    html.dark {
+      --card-bg: #2a2b30;
+      --body-bg: #18191d;
+      --text: #e8e8ec;
+      --text-muted: #999;
+      --text-faint: #555;
+      --header-bg: #111215;
+      --mid: #3a3b40;
+      --shadow: rgba(0,0,0,.3);
+      --gray: #222328;
+    }
+
+    body {
+      font-family: 'Jura', sans-serif;
+      background: var(--body-bg);
+      color: var(--text);
+      min-height: 100vh;
+      transition: background .3s, color .3s;
+    }
+
+    header {
+      background: var(--header-bg);
+      padding: 0 2rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 70px;
+      box-shadow: 0 2px 8px rgba(0,0,0,.4);
+    }
+
+    header img { height: 36px; filter: brightness(0) invert(1); }
+
+    .header-right { display: flex; align-items: center; gap: 1rem; }
+
+    .header-title { color: var(--white); font-size: 1rem; font-weight: 600; opacity: 0.7; }
+
+    .nav-link {
+      color: rgba(255,255,255,0.5); text-decoration: none; font-size: 0.85rem;
+      font-weight: 600; padding: 0.4rem 0.8rem; border-radius: 6px; transition: all .2s;
+    }
+    .nav-link:hover { color: #fff; background: rgba(255,255,255,0.1); }
+    .nav-link.active { color: #fff; background: var(--orange); }
+
+    .hdr-btn {
+      background: rgba(255,255,255,0.1); border: none; color: rgba(255,255,255,0.6);
+      width: 32px; height: 32px; border-radius: 6px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center; transition: background .2s, color .2s;
+    }
+    .hdr-btn:hover { background: rgba(255,255,255,0.2); color: #fff; }
+
+    main { max-width: 1200px; margin: 0 auto; padding: 2rem 1.5rem; }
+
+    .loading { text-align: center; padding: 4rem; color: var(--text-faint); font-size: 1rem; }
+
+    /* ── Total summary ── */
+    .total-summary {
+      display: flex; gap: 1.5rem; margin-bottom: 2rem; flex-wrap: wrap;
+    }
+
+    .total-stat {
+      background: var(--card-bg); border-radius: 12px; padding: 1.2rem 1.8rem;
+      box-shadow: 0 1px 4px var(--shadow); display: flex; flex-direction: column; gap: 4px;
+      transition: background .3s; min-width: 140px;
+    }
+
+    .total-stat-label { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted); }
+    .total-stat-value { font-size: 2rem; font-weight: 800; color: var(--text); }
+    .total-stat-value.orange { color: var(--orange); }
+    .total-stat-value.green { color: var(--green); }
+    .total-stat-value.red { color: var(--red); }
+
+    /* ── Printer cards ── */
+    .printer-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: 1.5rem;
+    }
+
+    .printer-card {
+      background: var(--card-bg);
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 1px 4px var(--shadow);
+      border-top: 8px solid var(--orange);
+      transition: background .3s;
+    }
+
+    .printer-card-header {
+      padding: 1.2rem 1.5rem;
+      border-bottom: 1px solid var(--mid);
+    }
+
+    .printer-card-name { font-size: 1.1rem; font-weight: 800; }
+    .printer-card-model { font-size: 0.72rem; color: var(--text-muted); margin-top: 2px; }
+
+    .printer-card-body { padding: 1rem 1.5rem 1.5rem; }
+
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 0.8rem;
+    }
+
+    .stat-item { display: flex; flex-direction: column; gap: 2px; }
+    .stat-item-label { font-size: 0.65rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
+    .stat-item-value { font-size: 1.3rem; font-weight: 800; }
+
+    /* ── Success rate bar ── */
+    .rate-bar-wrap { margin-top: 1rem; }
+    .rate-bar-label { font-size: 0.65rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 4px; }
+    .rate-bar { height: 10px; background: var(--red); border-radius: 5px; overflow: hidden; }
+    .rate-bar-fill { height: 100%; background: var(--green); border-radius: 5px; transition: width .5s; }
+    .rate-bar-numbers { display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--text-muted); margin-top: 3px; }
+
+    /* ── Recent prints ── */
+    .recent-title {
+      font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em;
+      color: var(--text-muted); margin-top: 1.2rem; margin-bottom: 0.5rem;
+    }
+
+    .ams-colors-wrap { margin-top: 1rem; }
+    .ams-colors-title { font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted); margin-bottom: 0.4rem; }
+    .ams-colors { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+    .ams-dot {
+      width: 22px; height: 22px; border-radius: 50%;
+      border: 2px solid rgba(128,128,128,0.2);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.5rem; color: transparent;
+    }
+    .ams-dot:hover { border-color: var(--orange); }
+    .ams-dot-label { font-size: 0.6rem; color: var(--text-muted); margin-top: 2px; text-align: center; }
+
+    .recent-list { display: flex; flex-direction: column; gap: 0.3rem; }
+
+    .recent-item {
+      display: flex; align-items: center; gap: 0.5rem;
+      font-size: 0.75rem; color: var(--text-muted); padding: 0.25rem 0;
+    }
+
+    .recent-dot {
+      width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+    }
+
+    .recent-dot.success { background: var(--green); }
+    .recent-dot.fail { background: var(--red); }
+
+    .recent-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+    .recent-time { color: var(--text-faint); font-size: 0.68rem; }
+  </style>
+</head>
+<body>
+
+<header>
+  <img src="https://www.makerspaceringebu.no/wp-content/uploads/2021/05/MSR_navnetrekk-liggende-svart.png"
+       alt="Makerspace Ringebu" />
+  <div class="header-right">
+    <a href="/" class="nav-link">Dashboard</a>
+    <a href="/stats" class="nav-link active">Statistikk</a>
+
+    <button class="hdr-btn" onclick="toggleTheme()" title="Bytt tema">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<main>
+  <div class="loading" id="loading">Henter statistikk...</div>
+  <div id="content" style="display:none;">
+    <div class="total-summary" id="total-summary"></div>
+    <div class="printer-grid" id="printer-grid"></div>
+  </div>
+</main>
+
+<script>
+  function toggleTheme() {
+    document.documentElement.classList.toggle('dark');
+    localStorage.setItem('theme', document.documentElement.classList.contains('dark') ? 'dark' : 'light');
+  }
+  if (localStorage.getItem('theme') === 'dark') document.documentElement.classList.add('dark');
+
+  function formatDuration(seconds) {
+    if (!seconds) return '0t';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    if (h > 24) {
+      const d = Math.floor(h / 24);
+      const rh = h % 24;
+      return `${d}d ${rh}t`;
+    }
+    if (h > 0) return `${h}t ${m}m`;
+    return `${m}m`;
+  }
+
+  function formatWeight(grams) {
+    if (!grams) return '0g';
+    if (grams >= 1000) return `${(grams / 1000).toFixed(1)}kg`;
+    return `${Math.round(grams)}g`;
+  }
+
+  function formatMeters(grams) {
+    // Grov estimering: 1kg PLA ~ 330m med 1.75mm filament
+    const meters = (grams / 1000) * 330;
+    if (meters >= 1000) return `${(meters / 1000).toFixed(1)}km`;
+    return `${Math.round(meters)}m`;
+  }
+
+  function formatDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return d.toLocaleDateString('no-NO', { day: 'numeric', month: 'short' });
+  }
+
+  async function loadStats() {
+    try {
+      const [res, colorsRes] = await Promise.all([
+        fetch('/api/stats'),
+        fetch('/api/ams-colors'),
+      ]);
+      const data = await res.json();
+      const amsColors = await colorsRes.json().catch(() => ({}));
+
+      if (data.error) {
+        document.getElementById('loading').textContent = 'Feil: ' + data.error;
+        return;
+      }
+
+      const devices = data.devices || [];
+
+      // Totaler
+      let totalPrints = 0, totalSuccess = 0, totalFailed = 0, totalTime = 0, totalWeight = 0;
+      devices.forEach(d => {
+        totalPrints += d.total_prints;
+        totalSuccess += d.successful;
+        totalFailed += d.failed;
+        totalTime += d.total_time_s;
+        totalWeight += d.total_weight_g;
+      });
+
+      const successRate = totalPrints > 0 ? Math.round((totalSuccess / totalPrints) * 100) : 0;
+
+      document.getElementById('total-summary').innerHTML = `
+        <div class="total-stat">
+          <span class="total-stat-label">Totalt prints</span>
+          <span class="total-stat-value orange">${totalPrints}</span>
+        </div>
+        <div class="total-stat">
+          <span class="total-stat-label">Vellykket</span>
+          <span class="total-stat-value green">${totalSuccess}</span>
+        </div>
+        <div class="total-stat">
+          <span class="total-stat-label">Feilet / avbrutt</span>
+          <span class="total-stat-value red">${totalFailed}</span>
+        </div>
+        <div class="total-stat">
+          <span class="total-stat-label">Suksessrate</span>
+          <span class="total-stat-value green">${successRate}%</span>
+        </div>
+        <div class="total-stat">
+          <span class="total-stat-label">Total printtid</span>
+          <span class="total-stat-value">${formatDuration(totalTime)}</span>
+        </div>
+        <div class="total-stat">
+          <span class="total-stat-label">Filament brukt</span>
+          <span class="total-stat-value">${formatWeight(totalWeight)}</span>
+        </div>
+        <div class="total-stat">
+          <span class="total-stat-label">Filament (lengde)</span>
+          <span class="total-stat-value">${formatMeters(totalWeight)}</span>
+        </div>
+      `;
+
+      // Sortert etter antall prints
+      devices.sort((a, b) => b.total_prints - a.total_prints);
+
+      document.getElementById('printer-grid').innerHTML = devices.map(d => {
+        const rate = d.total_prints > 0 ? Math.round((d.successful / d.total_prints) * 100) : 0;
+        const recentTasks = (d.tasks || []).slice(0, 5);
+
+        const recentHtml = recentTasks.map(t => `
+          <div class="recent-item">
+            <div class="recent-dot ${t.status === 2 ? 'success' : 'fail'}"></div>
+            <span class="recent-name">${t.title}</span>
+            <span class="recent-time">${formatDate(t.start_time)} · ${formatDuration(t.cost_time)}</span>
+          </div>
+        `).join('');
+
+        return `
+          <div class="printer-card">
+            <div class="printer-card-header">
+              <div class="printer-card-name">${d.name}</div>
+              <div class="printer-card-model">${d.model}</div>
+            </div>
+            <div class="printer-card-body">
+              <div class="stat-grid">
+                <div class="stat-item">
+                  <span class="stat-item-label">Prints</span>
+                  <span class="stat-item-value" style="color:var(--orange)">${d.total_prints}</span>
+                </div>
+                <div class="stat-item">
+                  <span class="stat-item-label">Printtid</span>
+                  <span class="stat-item-value">${formatDuration(d.total_time_s)}</span>
+                </div>
+                <div class="stat-item">
+                  <span class="stat-item-label">Filament</span>
+                  <span class="stat-item-value">${formatWeight(d.total_weight_g)}</span>
+                </div>
+                <div class="stat-item">
+                  <span class="stat-item-label">Lengde</span>
+                  <span class="stat-item-value">${formatMeters(d.total_weight_g)}</span>
+                </div>
+              </div>
+
+              <div class="rate-bar-wrap">
+                <div class="rate-bar-label">Suksessrate</div>
+                <div class="rate-bar">
+                  <div class="rate-bar-fill" style="width: ${rate}%"></div>
+                </div>
+                <div class="rate-bar-numbers">
+                  <span>${d.successful} vellykket</span>
+                  <span>${rate}%</span>
+                  <span>${d.failed} feilet</span>
+                </div>
+              </div>
+
+              ${(amsColors[d.device_id] && amsColors[d.device_id].length > 0) ? `
+                <div class="ams-colors-wrap">
+                  <div class="ams-colors-title">Filament lastet</div>
+                  <div class="ams-colors">${amsColors[d.device_id].map(c =>
+                    `<div style="display:flex;flex-direction:column;align-items:center;gap:2px;">
+                      <div class="ams-dot" style="background:${c.color};" title="${c.type} ${c.color}"></div>
+                      <span class="ams-dot-label">${c.type}</span>
+                    </div>`
+                  ).join('')}</div>
+                </div>
+              ` : ''}
+
+              ${recentTasks.length > 0 ? `
+                <div class="recent-title">Siste prints</div>
+                <div class="recent-list">${recentHtml}</div>
+              ` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('content').style.display = 'block';
+    } catch (e) {
+      document.getElementById('loading').textContent = 'Kunne ikke hente statistikk.';
+      console.error(e);
+    }
+  }
+
+  loadStats();
+</script>
+</body>
+</html>
