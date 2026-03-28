@@ -190,7 +190,23 @@
     body.fit-screen .idle-msg { font-size: 0.72rem; padding: 0.25rem 0; }
 
     /* Dynamiske kolonner */
-    .grid.cols-5 { grid-template-columns: repeat(5, 1fr); }
+    .grid.cols-5 {
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      justify-items: center;
+    }
+
+    /* Sentrere siste rad med flexbox-wrapper */
+    .grid.cols-5 {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.6rem;
+      justify-content: center;
+    }
+
+    .grid.cols-5 > .card {
+      width: calc((100% - 4 * 0.6rem) / 5);
+      min-width: 0;
+    }
 
     /* ── Card ── */
     .card {
