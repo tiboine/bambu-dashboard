@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="no">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>3D-print status – Makerspace Ringebu</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Jura:wght@400;600;800&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --orange: #d96c00;
+      --dark:   #1a1b1f;
+      --gray:   #f1f1f3;
+      --mid:    #e0e0e3;
+      --white:  #ffffff;
+      --green:  #2ecc71;
+      --red:    #e74c3c;
+      --blue:   #3498db;
+    }
+
+    body {
+      font-family: 'Jura', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--gray);
+      color: var(--dark);
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      background: var(--dark);
+      padding: 0 2rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 70px;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      box-shadow: 0 2px 8px rgba(0,0,0,.4);
+    }
+
+    header img {
+      height: 36px;
+      filter: brightness(0) invert(1);
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 1.2rem;
+    }
+
+    .header-title {
+      color: var(--white);
+      font-size: 1rem;
+      font-weight: 600;
+      opacity: 0.7;
+      letter-spacing: 0.03em;
+    }
+
+    .last-updated {
+      font-size: 0.78rem;
+      color: rgba(255,255,255,0.45);
+      font-weight: 400;
+    }
+
+    .pulse-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--green);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%       { opacity: 0.5; transform: scale(0.85); }
+    }
+
+    /* ── Main ── */
+    main {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 2rem 1.5rem;
+    }
+
+    .section-title {
+      font-size: 0.75rem;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--orange);
+      margin-bottom: 1.2rem;
+    }
+
+    /* ── Grid ── */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 1.25rem;
+    }
+
+    /* ── Card ── */
+    .card {
+      background: var(--white);
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 1px 4px rgba(0,0,0,.08);
+      transition: box-shadow .2s;
+      border-top: 4px solid var(--mid);
+    }
+
+    .card.printing  { border-top-color: var(--orange); }
+    .card.online    { border-top-color: var(--green); }
+    .card.offline   { border-top-color: var(--red); opacity: .7; }
+
+    .card:hover { box-shadow: 0 4px 16px rgba(0,0,0,.12); }
+
+    .card-header {
+      padding: 1rem 1.25rem 0.75rem;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 0.5rem;
+    }
+
+    .card-name {
+      font-size: 1rem;
+      font-weight: 800;
+      line-height: 1.2;
+      flex: 1;
+    }
+
+    .card-model {
+      font-size: 0.72rem;
+      color: #888;
+      font-weight: 400;
+      margin-top: 2px;
+    }
+
+    /* ── Status badge ── */
+    .badge {
+      font-size: 0.68rem;
+      font-weight: 600;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      padding: 3px 9px;
+      border-radius: 20px;
+      white-space: nowrap;
+    }
+
+    .badge-printing { background: #fff3e0; color: var(--orange); }
+    .badge-online   { background: #e8f8f0; color: #27ae60; }
+    .badge-offline  { background: #fdecea; color: var(--red); }
+    .badge-idle     { background: #eef2ff; color: #5c6bc0; }
+    .badge-done     { background: #e8f8f0; color: #27ae60; }
+
+    /* ── Thumbnail ── */
+    .thumb-wrap {
+      padding: 0 1.25rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .thumb-wrap img {
+      width: 100%;
+      max-height: 160px;
+      object-fit: contain;
+      border-radius: 8px;
+      background: var(--gray);
+    }
+
+    .no-thumb {
+      width: 100%;
+      height: 90px;
+      background: var(--gray);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #ccc;
+      font-size: 2rem;
+    }
+
+    /* ── Job info ── */
+    .card-body {
+      padding: 0 1.25rem 1.25rem;
+    }
+
+    .job-name {
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 0.6rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--dark);
+    }
+
+    .job-name span {
+      color: #999;
+      font-weight: 400;
+    }
+
+    /* ── Progress bar ── */
+    .progress-wrap {
+      margin-bottom: 0.5rem;
+    }
+
+    .progress-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.72rem;
+      color: #888;
+      margin-bottom: 4px;
+    }
+
+    .progress-labels strong {
+      color: var(--orange);
+      font-size: 0.85rem;
+    }
+
+    .progress-bar {
+      height: 8px;
+      background: var(--mid);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--orange), #ff9800);
+      border-radius: 4px;
+      transition: width 1s ease;
+    }
+
+    /* ── Time remaining ── */
+    .time-row {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.78rem;
+      color: #666;
+      margin-top: 0.5rem;
+    }
+
+    .time-row svg { flex-shrink: 0; }
+
+    /* ── Idle / offline message ── */
+    .idle-msg {
+      font-size: 0.82rem;
+      color: #aaa;
+      font-style: italic;
+      padding: 0.5rem 0;
+    }
+
+    /* ── Error banner ── */
+    .error-banner {
+      background: #fdecea;
+      border: 1px solid #f5c6cb;
+      border-radius: 8px;
+      padding: 0.9rem 1.25rem;
+      color: #c0392b;
+      font-size: 0.85rem;
+      margin-bottom: 1.5rem;
+      display: none;
+    }
+
+    /* ── Summary bar ── */
+    .summary {
+      display: flex;
+      gap: 1.5rem;
+      margin-bottom: 1.5rem;
+      flex-wrap: wrap;
+    }
+
+    .stat {
+      background: var(--white);
+      border-radius: 10px;
+      padding: 0.75rem 1.25rem;
+      box-shadow: 0 1px 4px rgba(0,0,0,.07);
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .stat-label {
+      font-size: 0.68rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #999;
+    }
+
+    .stat-value {
+      font-size: 1.6rem;
+      font-weight: 800;
+      color: var(--dark);
+    }
+
+    .stat-value.orange { color: var(--orange); }
+
+    /* ── Empty state ── */
+    .empty {
+      text-align: center;
+      padding: 4rem 1rem;
+      color: #bbb;
+      font-size: 0.95rem;
+    }
+
+    /* ── Footer ── */
+    footer {
+      text-align: center;
+      padding: 2rem;
+      font-size: 0.72rem;
+      color: #bbb;
+    }
+
+    footer a { color: var(--orange); text-decoration: none; }
+  </style>
+</head>
+<body>
+
+<header>
+  <img src="https://www.makerspaceringebu.no/wp-content/uploads/2021/05/MSR_navnetrekk-liggende-svart.png"
+       alt="Makerspace Ringebu" />
+  <div class="header-right">
+    <span class="header-title">3D-print status</span>
+    <span class="last-updated" id="last-updated">Henter data...</span>
+    <div class="pulse-dot" id="pulse" style="background: #888;"></div>
+  </div>
+</header>
+
+<main>
+  <div class="error-banner" id="error-banner"></div>
+
+  <div class="summary" id="summary"></div>
+
+  <div class="section-title">Printere</div>
+  <div class="grid" id="grid">
+    <div class="empty">Laster printere...</div>
+  </div>
+</main>
+
+<footer>
+  <a href="https://makerspaceringebu.no" target="_blank">makerspaceringebu.no</a>
+  &nbsp;·&nbsp; Oppdateres automatisk hvert 15. sekund
+</footer>
+
+<script>
+  function formatTime(seconds) {
+    if (!seconds || seconds <= 0) return null;
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    if (h > 0) return `${h}t ${m}m gjenstår`;
+    if (m > 0) return `${m} min gjenstår`;
+    return 'Under 1 min gjenstår';
+  }
+
+  function statusLabel(printer) {
+    if (!printer.online) return { text: 'Offline', cls: 'badge-offline' };
+    const s = (printer.print_status || '').toUpperCase();
+    if (s === 'RUNNING' || s === 'PRINTING') return { text: 'Printer', cls: 'badge-printing' };
+    if (s === 'SUCCESS' || s === 'FINISH') return { text: 'Ferdig', cls: 'badge-done' };
+    if (s === 'IDLE' || s === '') return { text: 'Ledig', cls: 'badge-idle' };
+    return { text: printer.print_status || 'Online', cls: 'badge-online' };
+  }
+
+  function cardClass(printer) {
+    if (!printer.online) return 'offline';
+    const s = (printer.print_status || '').toUpperCase();
+    if (s === 'RUNNING' || s === 'PRINTING') return 'printing';
+    return 'online';
+  }
+
+  function renderCard(p) {
+    const badge = statusLabel(p);
+    const cls = cardClass(p);
+    const isPrinting = cls === 'printing';
+    const progress = p.progress != null ? parseFloat(p.progress) : null;
+    const timeStr = formatTime(p.time_remaining);
+
+    let thumbHtml = '';
+    if (p.thumbnail) {
+      thumbHtml = `<div class="thumb-wrap"><img src="${p.thumbnail}" alt="Forhåndsvisning" /></div>`;
+    } else if (isPrinting) {
+      thumbHtml = `<div class="thumb-wrap"><div class="no-thumb">🖨️</div></div>`;
+    }
+
+    let bodyHtml = '';
+    if (isPrinting && p.task_name) {
+      bodyHtml += `<div class="job-name"><span>Fil: </span>${p.task_name}</div>`;
+    }
+
+    if (isPrinting && progress != null) {
+      bodyHtml += `
+        <div class="progress-wrap">
+          <div class="progress-labels">
+            <span>Fremgang</span>
+            <strong>${Math.round(progress)}%</strong>
+          </div>
+          <div class="progress-bar">
+            <div class="progress-fill" style="width: ${progress}%"></div>
+          </div>
+        </div>`;
+      if (timeStr) {
+        bodyHtml += `
+          <div class="time-row">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+            </svg>
+            ${timeStr}
+          </div>`;
+      }
+    } else if (!p.online) {
+      bodyHtml += `<div class="idle-msg">Printeren er ikke tilgjengelig.</div>`;
+    } else {
+      bodyHtml += `<div class="idle-msg">Ingen aktiv jobb.</div>`;
+    }
+
+    return `
+      <div class="card ${cls}">
+        <div class="card-header">
+          <div>
+            <div class="card-name">${p.name}</div>
+            <div class="card-model">${p.model}</div>
+          </div>
+          <span class="badge ${badge.cls}">${badge.text}</span>
+        </div>
+        ${thumbHtml}
+        <div class="card-body">${bodyHtml}</div>
+      </div>`;
+  }
+
+  function renderSummary(printers) {
+    const total   = printers.length;
+    const online  = printers.filter(p => p.online).length;
+    const printing = printers.filter(p => {
+      const s = (p.print_status || '').toUpperCase();
+      return s === 'RUNNING' || s === 'PRINTING';
+    }).length;
+
+    return `
+      <div class="stat">
+        <span class="stat-label">Printere totalt</span>
+        <span class="stat-value">${total}</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Online</span>
+        <span class="stat-value">${online}</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Printer nå</span>
+        <span class="stat-value orange">${printing}</span>
+      </div>`;
+  }
+
+  async function refresh() {
+    try {
+      const res = await fetch('/api/status');
+      const data = await res.json();
+
+      const errorEl = document.getElementById('error-banner');
+      if (data.error) {
+        errorEl.textContent = 'Feil: ' + data.error;
+        errorEl.style.display = 'block';
+      } else {
+        errorEl.style.display = 'none';
+      }
+
+      if (data.last_updated) {
+        document.getElementById('last-updated').textContent = 'Sist oppdatert: ' + data.last_updated;
+      }
+
+      const pulse = document.getElementById('pulse');
+      pulse.style.background = data.error ? '#e74c3c' : '#2ecc71';
+
+      const grid = document.getElementById('grid');
+      const summary = document.getElementById('summary');
+
+      if (!data.printers || data.printers.length === 0) {
+        grid.innerHTML = '<div class="empty">Ingen printere funnet.</div>';
+        summary.innerHTML = '';
+        return;
+      }
+
+      summary.innerHTML = renderSummary(data.printers);
+      grid.innerHTML = data.printers.map(renderCard).join('');
+    } catch (e) {
+      console.error('Kunne ikke hente status:', e);
+    }
+  }
+
+  refresh();
+  setInterval(refresh, 15000);
+</script>
+</body>
+</html>

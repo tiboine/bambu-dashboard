@@ -1,0 +1,20 @@
+{
+  "printers": [
+    {
+      "name": "Bambu P1S #1",
+      "ip": "192.168.1.100",
+      "serial": "01S00C123456789",
+      "access_code": "12345678"
+    },
+    {
+      "name": "Bambu X1C #1",
+      "ip": "192.168.1.101",
+      "serial": "01X00C987654321",
+      "access_code": "87654321"
+    }
+  ],
+  "server": {
+    "host": "0.0.0.0",
+    "port": 5000
+  }
+}
