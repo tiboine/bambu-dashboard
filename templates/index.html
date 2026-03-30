@@ -615,6 +615,22 @@
     else document.documentElement.requestFullscreen();
   }
 
+  // Auto-fullskjerm hvis ?autoscreen i URL (fra start.bat)
+  if (new URLSearchParams(location.search).has('autoscreen')) {
+    const tryFullscreen = () => {
+      document.documentElement.requestFullscreen().catch(() => {});
+      document.removeEventListener('click', tryFullscreen);
+      document.removeEventListener('keydown', tryFullscreen);
+    };
+    // Prøv umiddelbart (virker i noen oppsett), ellers ved første interaksjon
+    setTimeout(() => {
+      document.documentElement.requestFullscreen().catch(() => {
+        document.addEventListener('click', tryFullscreen, { once: true });
+        document.addEventListener('keydown', tryFullscreen, { once: true });
+      });
+    }, 1000);
+  }
+
   // ── Auto toggle ──
   function toggleAuto() {
     autoMode = !autoMode;
