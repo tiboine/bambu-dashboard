@@ -56,15 +56,48 @@
       padding: 0 2rem;
       display: flex;
       align-items: center;
-      justify-content: space-between;
       height: 70px;
       position: sticky;
       top: 0;
       z-index: 100;
       box-shadow: 0 2px 8px rgba(0,0,0,.4);
+      gap: 1rem;
     }
 
-    header img { height: 36px; filter: brightness(0) invert(1); }
+    header img { height: 36px; filter: brightness(0) invert(1); flex-shrink: 0; }
+
+    .header-center {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.6rem;
+    }
+
+    .header-stat {
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+      color: rgba(255,255,255,0.6);
+      font-size: 0.78rem;
+      font-weight: 600;
+    }
+
+    .header-stat-value {
+      color: #fff;
+      font-weight: 800;
+      font-size: 1rem;
+    }
+
+    .header-stat-value.orange { color: var(--orange); }
+    .header-stat-value.red { color: var(--red); }
+
+    .header-stat-sep {
+      width: 1px;
+      height: 18px;
+      background: rgba(255,255,255,0.15);
+      margin: 0 0.2rem;
+    }
 
     .header-right {
       display: flex;
@@ -159,10 +192,7 @@
       overflow: hidden;
     }
 
-    body.fit-screen .summary { margin-bottom: 0.4rem; flex-shrink: 0; gap: 0.6rem; }
-    body.fit-screen .stat { padding: 0.4rem 0.8rem; }
-    body.fit-screen .stat-value { font-size: 1.2rem; }
-    body.fit-screen .stat-label { font-size: 0.6rem; }
+    body.fit-screen .summary { display: none; }
     body.fit-screen .section-title { margin-bottom: 0.4rem; flex-shrink: 0; }
     body.fit-screen .grid {
       flex: 1;
@@ -221,7 +251,7 @@
 
     .card.printing  { border-top-color: var(--orange); }
     .card.online    { border-top-color: var(--green); }
-    .card.offline   { border-top-color: var(--red); opacity: .7; }
+    .card.offline   { border-top-color: #999; opacity: .7; }
     .card.failed    { border-top-color: var(--red); animation: card-blink 1.5s ease-in-out infinite; }
     .card.paused    { border-top-color: #f39c12; animation: card-blink-warn 2s ease-in-out infinite; }
     .card.just-done { border-top-color: var(--green); }
@@ -438,15 +468,8 @@
     .verify-btn:disabled { opacity: 0.5; cursor: not-allowed; }
     .verify-error { color: var(--red); font-size: 0.8rem; margin-top: 0.75rem; display: none; }
 
-    /* ── Summary bar ── */
-    .summary { display: flex; gap: 1.5rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
-    .stat {
-      background: var(--card-bg); border-radius: 10px; padding: 0.75rem 1.25rem;
-      box-shadow: 0 1px 4px var(--shadow); display: flex; flex-direction: column; gap: 2px; transition: background .3s;
-    }
-    .stat-label { font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted); }
-    .stat-value { font-size: 1.6rem; font-weight: 800; color: var(--text); }
-    .stat-value.orange { color: var(--orange); }
+    /* ── Summary bar (hidden, moved to header) ── */
+    .summary { display: none; }
 
     /* ── Empty state ── */
     .empty { text-align: center; padding: 4rem 1rem; color: var(--text-faint); font-size: 0.95rem; }
@@ -502,6 +525,7 @@
 <header>
   <img src="https://www.makerspaceringebu.no/wp-content/uploads/2021/05/MSR_navnetrekk-liggende-svart.png"
        alt="Makerspace Ringebu" />
+  <div class="header-center" id="header-stats"></div>
   <div class="header-right">
     <a href="/" style="color:#fff;text-decoration:none;font-size:0.85rem;font-weight:600;padding:0.4rem 0.8rem;border-radius:6px;background:var(--orange);">Dashboard</a>
     <a href="/stats" style="color:rgba(255,255,255,0.5);text-decoration:none;font-size:0.85rem;font-weight:600;padding:0.4rem 0.8rem;border-radius:6px;" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='rgba(255,255,255,0.5)'">Statistikk</a>
@@ -792,12 +816,17 @@
     const printing = printers.filter(p => { const s = getEffectiveStatus(p); return s === 'RUNNING' || s === 'PRINTING'; }).length;
     const failed = printers.filter(p => { const s = getEffectiveStatus(p); return s === 'FAIL' || s === 'FAILED'; }).length;
 
-    let html = `
-      <div class="stat"><span class="stat-label">Totalt</span><span class="stat-value">${total}</span></div>
-      <div class="stat"><span class="stat-label">Online</span><span class="stat-value">${online}</span></div>
-      <div class="stat"><span class="stat-label">Printer</span><span class="stat-value orange">${printing}</span></div>`;
-    if (failed > 0) html += `<div class="stat"><span class="stat-label">Feil</span><span class="stat-value" style="color:var(--red)">${failed}</span></div>`;
-    return html;
+    // Render into header
+    let headerHtml = `
+      <span class="header-stat"><span class="header-stat-value">${total}</span> totalt</span>
+      <span class="header-stat-sep"></span>
+      <span class="header-stat"><span class="header-stat-value">${online}</span> online</span>
+      <span class="header-stat-sep"></span>
+      <span class="header-stat"><span class="header-stat-value orange">${printing}</span> printer</span>`;
+    if (failed > 0) headerHtml += `<span class="header-stat-sep"></span><span class="header-stat"><span class="header-stat-value red">${failed}</span> feil</span>`;
+    document.getElementById('header-stats').innerHTML = headerHtml;
+
+    return ''; // summary div is hidden now
   }
 
   // ── Verifisering ──
@@ -867,6 +896,7 @@
       });
 
       const sorted = sortPrinters(data.printers);
+      lastPrinters = sorted;
       summary.innerHTML = renderSummary(sorted);
       grid.innerHTML = sorted.map(renderCard).join('');
 
@@ -874,18 +904,45 @@
     } catch (e) { console.error('Kunne ikke hente status:', e); }
   }
 
+  let lastPrinters = [];
+
+  function todayDateStr() {
+    return new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
+  }
+
+  function calcOngoingFilament(printers) {
+    // Kun pågående print som startet i dag
+    const today = todayDateStr();
+    let weightG = 0;
+    if (!printers) return weightG;
+    printers.forEach(p => {
+      const s = getEffectiveStatus(p);
+      if ((s === 'RUNNING' || s === 'PRINTING') && p.progress != null && p.job_started_at) {
+        if (p.job_started_at.slice(0, 10) === today) {
+          const pct = parseFloat(p.progress) / 100;
+          weightG += pct * 20; // estimat ~20g per print
+        }
+      }
+    });
+    return Math.round(weightG);
+  }
+
   async function refreshToday() {
     try {
       const res = await fetch('/api/today');
       const d = await res.json();
       const bar = document.getElementById('today-bar');
-      const weightG = Math.round(d.weight_g);
-      const meters = Math.round((d.weight_g / 1000) * 330);
+
+      // Legg til estimert forbruk fra pågående print som startet i dag
+      const ongoingG = calcOngoingFilament(lastPrinters);
+      const totalWeightG = Math.round(d.weight_g) + ongoingG;
+      const meters = Math.round((totalWeightG / 1000) * 330);
       const lengthStr = meters >= 1000 ? `${(meters / 1000).toFixed(1)}km` : `${meters}m`;
+
       bar.innerHTML = `
         <div class="today-item"><span class="today-label">I dag</span></div>
         <div class="today-item"><span class="today-value">${d.prints}</span><span class="today-label">prints</span></div>
-        <div class="today-item"><span class="today-value">${weightG}g</span><span class="today-label">filament</span></div>
+        <div class="today-item"><span class="today-value">${totalWeightG}g</span><span class="today-label">filament</span></div>
         <div class="today-item"><span class="today-value">${lengthStr}</span><span class="today-label">lengde</span></div>
       `;
     } catch (e) {}

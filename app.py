@@ -225,7 +225,17 @@ def on_message(client, userdata, msg):
     # Oppdater MQTT-status (merge delta-oppdateringer)
     if dev_id not in state["mqtt_status"]:
         state["mqtt_status"][dev_id] = {}
+
+    prev_state = state["mqtt_status"][dev_id].get("gcode_state", "")
     state["mqtt_status"][dev_id].update(print_data)
+    new_state = state["mqtt_status"][dev_id].get("gcode_state", "")
+
+    # Registrer tidspunkt når en ny jobb starter
+    if new_state in ("RUNNING", "PREPARE") and prev_state not in ("RUNNING", "PREPARE"):
+        state["mqtt_status"][dev_id]["job_started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    # Nullstill job_started_at når jobben er ferdig/avbrutt
+    elif new_state in ("IDLE", "FAILED", "FINISH") and prev_state in ("RUNNING", "PREPARE", "PAUSE"):
+        state["mqtt_status"][dev_id]["job_started_at"] = None
 
     # Oppdater online-status
     if dev_id in state["devices"]:
@@ -361,6 +371,7 @@ def build_printer_list():
 
         # Hent cover-bilde fra tasks API
         thumbnail = state.get("task_covers", {}).get(dev_id)
+        job_started_at = mqtt_data.get("job_started_at")
 
         printers.append({
             "id": dev_id,
@@ -371,6 +382,7 @@ def build_printer_list():
             "task_name": task_name or None,
             "progress": progress,
             "time_remaining": time_remaining,
+            "job_started_at": job_started_at,
             "layer": layer,
             "total_layers": total_layers,
             "nozzle_temp": nozzle_temp,
