@@ -737,9 +737,6 @@
     }
 
     let bodyHtml = '';
-    if (hasJob && p.task_name) {
-      bodyHtml += `<div class="job-name"><span>Fil: </span>${p.task_name}</div>`;
-    }
 
     if (isFailed) {
       bodyHtml += `<div class="idle-msg" style="color: var(--red); font-style: normal; font-weight: 600;">Printing feilet!</div>`;
