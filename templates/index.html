@@ -250,16 +250,27 @@
       overflow: hidden;
       box-shadow: 0 1px 4px var(--shadow);
       transition: box-shadow .2s, background .3s;
-      border-top: 8px solid var(--mid);
       position: relative;
     }
 
-    .card.printing  { border-top-color: var(--orange); }
-    .card.online    { border-top-color: var(--green); }
-    .card.offline   { border-top-color: #999; opacity: .7; }
-    .card.failed    { border-top-color: var(--red); animation: card-blink 1.5s ease-in-out infinite; }
-    .card.paused    { border-top-color: #f39c12; animation: card-blink-warn 2s ease-in-out infinite; }
-    .card.just-done { border-top-color: var(--green); }
+    .card-header {
+      background: #999;
+    }
+    .card.printing  .card-header { background: var(--orange); }
+    .card.online    .card-header { background: var(--green); }
+    .card.offline   .card-header { background: #999; opacity: .9; }
+    .card.failed    .card-header { background: var(--red); animation: card-blink-header 1.5s ease-in-out infinite; }
+    .card.paused    .card-header { background: #f39c12; animation: card-blink-header-warn 2s ease-in-out infinite; }
+    .card.just-done .card-header { background: var(--green); }
+
+    @keyframes card-blink-header {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: 0.6; }
+    }
+    @keyframes card-blink-header-warn {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: 0.65; }
+    }
 
     /* ── Background progress fill ── */
     .card-progress-bg {
@@ -365,7 +376,7 @@
     .card:hover { box-shadow: 0 4px 16px rgba(0,0,0,.12); }
 
     .card-header {
-      padding: 1rem 1.25rem 0.75rem;
+      padding: 0.6rem 1rem 0.5rem;
       display: flex;
       align-items: flex-start;
       justify-content: space-between;
@@ -374,7 +385,7 @@
       z-index: 1;
     }
 
-    .card-name { font-size: 1rem; font-weight: 800; line-height: 1.2; flex: 1; }
+    .card-name { font-size: 1rem; font-weight: 800; line-height: 1.2; flex: 1; color: #fff; }
     .card-model { font-size: 0.72rem; color: var(--text-muted); font-weight: 400; margin-top: 2px; }
 
     /* ── Status badge ── */
@@ -382,17 +393,11 @@
       font-size: 0.68rem; font-weight: 600; letter-spacing: 0.07em;
       text-transform: uppercase; padding: 3px 9px; border-radius: 20px; white-space: nowrap;
     }
-    .badge-printing { background: #fff3e0; color: var(--orange); }
-    .badge-online   { background: #e8f8f0; color: #27ae60; }
-    .badge-offline  { background: #fdecea; color: var(--red); }
-    .badge-idle     { background: #eef2ff; color: #5c6bc0; }
-    .badge-done     { background: #e8f8f0; color: #27ae60; }
-
-    html.dark .badge-printing { background: rgba(217,108,0,0.2); }
-    html.dark .badge-online   { background: rgba(46,204,113,0.15); }
-    html.dark .badge-offline  { background: rgba(231,76,60,0.2); }
-    html.dark .badge-idle     { background: rgba(92,107,192,0.2); }
-    html.dark .badge-done     { background: rgba(46,204,113,0.15); }
+    .badge-printing { background: rgba(0,0,0,0.25); color: #fff; }
+    .badge-online   { background: rgba(0,0,0,0.2); color: #fff; }
+    .badge-offline  { background: rgba(0,0,0,0.2); color: #fff; }
+    .badge-idle     { background: rgba(0,0,0,0.2); color: #fff; }
+    .badge-done     { background: rgba(0,0,0,0.2); color: #fff; }
 
     /* ── Thumbnail ── */
     .thumb-wrap { padding: 0 1.25rem; margin-bottom: 0.75rem; position: relative; z-index: 1; }
@@ -726,7 +731,11 @@
 
   function sortPrinters(printers) {
     const order = { printing: 0, failed: 1, paused: 2, 'just-done': 3, online: 4, offline: 5 };
-    return printers.sort((a, b) => (order[cardClass(a)] ?? 4) - (order[cardClass(b)] ?? 4));
+    return printers.sort((a, b) => {
+      const statusDiff = (order[cardClass(a)] ?? 4) - (order[cardClass(b)] ?? 4);
+      if (statusDiff !== 0) return statusDiff;
+      return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+    });
   }
 
   function renderCard(p) {
