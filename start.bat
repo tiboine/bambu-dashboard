@@ -7,4 +7,4 @@ start "" "app.py"
 echo Venter pa server...
 timeout /t 5 /nobreak >nul
 
-start "" "http://localhost:5000"
+start "" "chrome.exe" --kiosk "http://localhost:5000"
