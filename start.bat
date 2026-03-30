@@ -2,7 +2,7 @@
 cd /d "%~dp0"
 
 echo Starter Bambu Dashboard...
-powershell -WindowStyle Hidden -Command "Start-Process py -ArgumentList 'app.py' -WorkingDirectory '%~dp0'"
+start "Bambu Dashboard" /min C:\Windows\py.exe app.py
 
 echo Venter pa server...
 timeout /t 5 /nobreak >nul
