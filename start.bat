@@ -2,9 +2,9 @@
 cd /d "%~dp0"
 
 echo Starter Bambu Dashboard...
-start "" /B py app.py
+powershell -WindowStyle Hidden -Command "Start-Process py -ArgumentList 'app.py' -WorkingDirectory '%~dp0'"
 
-echo Venter på server...
-timeout /t 4 /nobreak >nul
+echo Venter pa server...
+timeout /t 5 /nobreak >nul
 
 start "" "http://localhost:5000"
