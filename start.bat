@@ -1,5 +1,5 @@
 @echo off
-cd /d "C:\ClaudeApps\bambu-dashboard"
+cd /d "%~dp0"
 
 echo Starter Bambu Dashboard...
 start "" "app.py"
