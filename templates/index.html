@@ -1,3 +1,4 @@
+<!-- VERSJON-TEST-2026 -->
 <!DOCTYPE html>
 <html lang="no">
 <head>
@@ -565,7 +566,6 @@
 
   <div class="error-banner" id="error-banner"></div>
   <div class="summary" id="summary"></div>
-  <div class="section-title">Printere</div>
   <div class="grid" id="grid">
     <div class="empty">Laster printere...</div>
   </div>
@@ -768,32 +768,7 @@
       bodyHtml += `<div class="idle-msg">Ingen aktiv jobb.</div>`;
     }
 
-    // Info-rad
-    let infoItems = [];
-    if (p.nozzle_temp != null) {
-      infoItems.push(`<span class="info-item"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 14.76V3.5a2.5 2.5 0 00-5 0v11.26a4.5 4.5 0 105 0z"/></svg>${Math.round(p.nozzle_temp)}°C</span>`);
-    }
-    if (p.bed_temp != null) {
-      infoItems.push(`<span class="info-item"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"/></svg>Plate ${Math.round(p.bed_temp)}°C</span>`);
-    }
-    if (p.layer != null && p.total_layers != null && p.total_layers > 0) {
-      infoItems.push(`<span class="info-item"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>Lag ${p.layer}/${p.total_layers}</span>`);
-    }
-    if (p.spd_lvl != null) {
-      const sl = speedLabel(p.spd_lvl);
-      if (sl) infoItems.push(`<span class="info-item"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>${sl}</span>`);
-    }
-    if (p.ams_colors && p.ams_colors.length > 0) {
-      const dots = p.ams_colors.map(c =>
-        `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${c.color};border:1px solid rgba(128,128,128,0.3);vertical-align:middle;" title="${c.type} ${c.color}"></span>`
-      ).join(' ');
-      infoItems.push(`<span class="info-item">${dots}</span>`);
-    }
-
-    let infoHtml = '';
-    if (infoItems.length > 0 && (hasJob || p.online)) {
-      infoHtml = `<div class="info-row">${infoItems.join('')}</div>`;
-    }
+    const infoHtml = '';
 
     return `
       <div class="card ${cls}">
@@ -801,7 +776,6 @@
         <div class="card-header">
           <div>
             <div class="card-name">${p.name}</div>
-            <div class="card-model">${p.model}</div>
           </div>
           <span class="badge ${badge.cls}">${badge.text}</span>
         </div>
