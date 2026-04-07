@@ -730,12 +730,9 @@
   }
 
   function sortPrinters(printers) {
-    const order = { printing: 0, failed: 1, paused: 2, 'just-done': 3, online: 4, offline: 5 };
-    return printers.sort((a, b) => {
-      const statusDiff = (order[cardClass(a)] ?? 4) - (order[cardClass(b)] ?? 4);
-      if (statusDiff !== 0) return statusDiff;
-      return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
-    });
+    return printers.sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+    );
   }
 
   function renderCard(p) {
