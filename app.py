@@ -397,8 +397,25 @@ def build_printer_list():
 
 # ── Bakgrunnstråd: periodisk refresh av enhetsliste ──
 
+def wait_for_network(timeout=60):
+    """Vent til internett er tilgjengelig (maks timeout sekunder)."""
+    import socket
+    print("[Nettverk] Venter på internettforbindelse...")
+    for i in range(timeout):
+        try:
+            socket.setdefaulttimeout(3)
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect(("8.8.8.8", 53))
+            print(f"[Nettverk] Tilkoblet etter {i}s")
+            return True
+        except OSError:
+            time.sleep(1)
+    print(f"[Nettverk] Ingen forbindelse etter {timeout}s – fortsetter likevel")
+    return False
+
+
 def init_connection():
     """Forsøk innlogging ved oppstart. Bruker lagret token hvis tilgjengelig."""
+    wait_for_network(timeout=60)
     try:
         if not load_token():
             login()
