@@ -110,7 +110,7 @@ cat > "$AUTOSTART_DIR/bambu-kiosk.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Bambu Kiosk
-Exec=$KIOSK_SCRIPT
+Exec=bash -c 'sleep 5 && $KIOSK_SCRIPT'
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true

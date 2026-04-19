@@ -13,7 +13,124 @@ from pathlib import Path
 load_dotenv()
 
 app = Flask(__name__)
-TOKEN_FILE = Path(__file__).parent / ".token.json"
+TOKEN_FILE  = Path(__file__).parent / ".token.json"
+STATS_FILE  = Path(__file__).parent / "stats_store.json"
+
+# ── Lokal stats-lagring ──────────────────────────────────────────
+# Struktur: { "stats": {dev_id: {...}}, "boundary": last_id, "complete": bool, "newest": id }
+_stats_lock  = threading.Lock()
+
+def load_stats_store():
+    try:
+        if STATS_FILE.exists():
+            return json.loads(STATS_FILE.read_text())
+    except Exception as e:
+        print(f"[Stats] Kunne ikke lese stats_store.json: {e}")
+    return {"stats": {}, "boundary": None, "complete": False, "newest": None, "api_total": 0}
+
+def save_stats_store(store):
+    try:
+        STATS_FILE.write_text(json.dumps(store))
+    except Exception as e:
+        print(f"[Stats] Kunne ikke lagre stats_store.json: {e}")
+
+def merge_task_into_store(store, task, devices):
+    dev_id = task.get("deviceId", "unknown")
+    if dev_id not in store["stats"]:
+        store["stats"][dev_id] = {
+            "name":            devices.get(dev_id, {}).get("name", dev_id),
+            "model":           devices.get(dev_id, {}).get("model", "Ukjent"),
+            "total_prints":    0,
+            "successful":      0,
+            "failed":          0,
+            "total_time_s":    0,
+            "total_weight_g":  0,
+            "total_length_cm": 0,
+        }
+    s = store["stats"][dev_id]
+    s["total_prints"]    += 1
+    s["successful" if task.get("status") == 2 else "failed"] += 1
+    s["total_time_s"]    += task.get("costTime", 0) or 0
+    s["total_weight_g"]  += task.get("weight", 0)   or 0
+    s["total_length_cm"] += task.get("length", 0)   or 0
+
+def fetch_task_page_raw(after=None):
+    """Henter én side med tasks direkte fra Bambu API."""
+    params = {"limit": 100}
+    if after:
+        params["after"] = after
+    resp = requests.get(
+        f"{BAMBU_API}/v1/user-service/my/tasks",
+        headers=headers(),
+        params=params,
+        timeout=20,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("hits", []), data.get("total", 0)
+
+def sync_stats_store():
+    """Synkroniserer lokal stats-lagring med Bambu API. Kjøres i bakgrunn."""
+    if not state["token"]:
+        return
+    with _stats_lock:
+        store = load_stats_store()
+        devices = state.get("devices", {})
+
+        # Hent ferske tasks (alltid)
+        recent, api_total = fetch_task_page_raw()
+        if api_total:
+            store["api_total"] = api_total
+        if not recent:
+            return
+
+        boundary_id = recent[-1].get("id")
+
+        # Historikk: hent alt eldre enn de ferske, med loop-deteksjon
+        if not store["complete"] and boundary_id:
+            after = store["boundary"] or boundary_id
+            deadline = time.time() + 25
+            seen = set()
+            while time.time() < deadline:
+                try:
+                    hits, _ = fetch_task_page_raw(after)
+                except Exception:
+                    break
+                if not hits:
+                    store["complete"] = True
+                    break
+                first_id = hits[0].get("id")
+                if first_id in seen:
+                    store["complete"] = True
+                    break
+                seen.add(first_id)
+                for task in hits:
+                    merge_task_into_store(store, task, devices)
+                store["boundary"] = hits[-1].get("id")
+                if len(hits) < 100:
+                    store["complete"] = True
+                    break
+                after = store["boundary"]
+            if not store.get("newest"):
+                store["newest"] = boundary_id
+
+        # Oppdater med nye tasks siden sist
+        elif store["complete"] and store.get("newest") != boundary_id:
+            stop = store["newest"]
+            for task in recent:
+                if task.get("id") == stop:
+                    break
+                merge_task_into_store(store, task, devices)
+            store["newest"] = boundary_id
+
+        # Oppdater enhetsnavn (kan ha endret seg)
+        for dev_id, s in store["stats"].items():
+            if dev_id in devices:
+                s["name"]  = devices[dev_id].get("name", s["name"])
+                s["model"] = devices[dev_id].get("model", s["model"])
+
+        save_stats_store(store)
+        print(f"[Stats] Lagret. API-total: {store['api_total']}, komplett: {store['complete']}")
 
 
 @app.after_request
@@ -430,7 +547,8 @@ def init_connection():
 
 def poll_loop():
     # Vent litt før første kjøring (init_connection kjører først)
-    time.sleep(60)
+    time.sleep(30)
+    stats_tick = 0
     while True:
         if not state["needs_verify_code"] and state["token"]:
             try:
@@ -438,6 +556,10 @@ def poll_loop():
                 fetch_task_covers()
                 if not state["mqtt_connected"]:
                     start_mqtt()
+                # Sync stats hvert 5. minutt (eller første gang)
+                stats_tick += 1
+                if stats_tick == 1 or stats_tick % 5 == 0:
+                    threading.Thread(target=sync_stats_store, daemon=True).start()
             except Exception as e:
                 state["error"] = str(e)
                 print(f"[Feil] {e}")
@@ -503,83 +625,18 @@ def stats_page():
 
 @app.route("/api/stats")
 def api_stats():
-    """Hent printhistorikk og beregn statistikk per printer."""
+    """Returner akkumulert statistikk fra lokal lagring."""
     if not state["token"]:
         return jsonify({"error": "Ikke innlogget"}), 401
-
-    try:
-        all_tasks = []
-        # Hent opptil 500 tasks (paginert)
-        after = None
-        for _ in range(5):
-            params = {"limit": 100}
-            if after:
-                params["after"] = after
-            resp = requests.get(
-                f"{BAMBU_API}/v1/user-service/my/tasks",
-                headers=headers(),
-                params=params,
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            hits = data.get("hits", [])
-            if not hits:
-                break
-            all_tasks.extend(hits)
-            if len(hits) < 100:
-                break
-            after = hits[-1].get("id")
-
-        # Aggreger per device
-        device_stats = {}
-        for task in all_tasks:
-            dev_id = task.get("deviceId", "unknown")
-            if dev_id not in device_stats:
-                device_stats[dev_id] = {
-                    "device_id": dev_id,
-                    "name": state["devices"].get(dev_id, {}).get("name", dev_id),
-                    "model": state["devices"].get(dev_id, {}).get("model", "Ukjent"),
-                    "total_prints": 0,
-                    "successful": 0,
-                    "failed": 0,
-                    "total_time_s": 0,
-                    "total_weight_g": 0,
-                    "tasks": [],
-                }
-
-            stats = device_stats[dev_id]
-            stats["total_prints"] += 1
-
-            # status: 2 = success, 3 = failed/cancelled
-            status = task.get("status", 0)
-            if status == 2:
-                stats["successful"] += 1
-            else:
-                stats["failed"] += 1
-
-            cost_time = task.get("costTime", 0) or 0
-            stats["total_time_s"] += cost_time
-
-            weight = task.get("weight", 0) or 0
-            stats["total_weight_g"] += weight
-
-            stats["tasks"].append({
-                "title": task.get("title", "Ukjent"),
-                "cover": task.get("cover"),
-                "status": status,
-                "start_time": task.get("startTime"),
-                "end_time": task.get("endTime"),
-                "cost_time": cost_time,
-                "weight": weight,
-            })
-
-        return jsonify({
-            "devices": list(device_stats.values()),
-            "total_tasks": len(all_tasks),
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    with _stats_lock:
+        store = load_stats_store()
+    total = sum(d["total_prints"] for d in store["stats"].values())
+    return jsonify({
+        "devices":       list(store["stats"].values()),
+        "total_tasks":   total,
+        "api_total":     store.get("api_total", 0),
+        "data_complete": store.get("complete", False),
+    })
 
 
 @app.route("/api/ams-colors")

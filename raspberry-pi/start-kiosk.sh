@@ -5,7 +5,7 @@
 # ─────────────────────────────────────────────────────────────────
 
 URL="http://localhost:5000"
-MAX_WAIT=60   # sekunder å vente på Flask
+MAX_WAIT=180   # sekunder å vente på Flask (nettverksforbindelse kan ta tid)
 
 # ── Deaktiver skjermsparer og strømstyring ────────────────────────
 export DISPLAY="${DISPLAY:-:0}"
