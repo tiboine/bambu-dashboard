@@ -1,0 +1,520 @@
+/* Bambu Lab 3D Print Dashboard – WordPress Plugin v1.0.8 */
+
+@import url('https://fonts.googleapis.com/css2?family=Jura:wght@400;600;800&display=swap');
+
+/* ── CSS-variabler (lyst tema) ───────────────────────────────────────────── */
+.bambu-wrap {
+  --bambu-orange:     #e96400;   /* MSR brand-farge */
+  --bambu-green:      #2ecc71;
+  --bambu-red:        #e74c3c;
+  --bambu-card-bg:    #ffffff;
+  --bambu-bg:         #f1f1f3;
+  --bambu-text:       #1a1b1f;
+  --bambu-text-bold:  #000000;
+  --bambu-text-muted: #888;
+  --bambu-text-faint: #bbb;
+  --bambu-mid:        #e0e0e3;
+  --bambu-shadow:     rgba(0,0,0,.08);
+
+  font-family: 'Jura', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bambu-bg);
+  color: var(--bambu-text);
+  padding: clamp(0.75rem, 1.2vw, 1.5rem);
+  border-radius: 12px;
+  transition: background .3s, color .3s;
+}
+
+/* ── Mørkt tema ──────────────────────────────────────────────────────────── */
+.bambu-wrap.bambu-dark {
+  --bambu-orange:     #e96400;
+  --bambu-card-bg:    #2a2b30;
+  --bambu-bg:         #18191d;
+  --bambu-text:       #ffffff;
+  --bambu-text-bold:  #ffffff;
+  --bambu-text-muted: #aaaaaa;
+  --bambu-text-faint: #666;
+  --bambu-mid:        #3a3b40;
+  --bambu-shadow:     rgba(0,0,0,.3);
+}
+
+@media (prefers-color-scheme: dark) {
+  .bambu-wrap:not(.bambu-light) {
+    --bambu-orange:     #e96400;
+    --bambu-card-bg:    #2a2b30;
+    --bambu-bg:         #18191d;
+    --bambu-text:       #ffffff;
+    --bambu-text-bold:  #ffffff;
+    --bambu-text-muted: #aaaaaa;
+    --bambu-text-faint: #666;
+    --bambu-mid:        #3a3b40;
+    --bambu-shadow:     rgba(0,0,0,.3);
+  }
+}
+
+/* ── Loading ─────────────────────────────────────────────────────────────── */
+.bambu-loading {
+  text-align: center;
+  padding: 3rem;
+  color: var(--bambu-text-faint);
+  font-size: clamp(0.85rem, 1.2vw, 1.4rem);
+}
+
+/* ── Sammendrag ──────────────────────────────────────────────────────────── */
+.bambu-summary {
+  display: flex;
+  gap: clamp(0.5rem, 1vw, 1.5rem);
+  margin-bottom: clamp(0.75rem, 1.2vw, 1.5rem);
+  flex-wrap: wrap;
+}
+
+.bambu-stat {
+  background: var(--bambu-card-bg);
+  border-radius: 10px;
+  padding: clamp(0.4rem, 0.8vh, 0.8rem) clamp(0.7rem, 1.2vw, 1.4rem);
+  box-shadow: 0 1px 4px var(--bambu-shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  transition: background .3s;
+}
+
+.bambu-stat-label {
+  font-size: clamp(0.55rem, 0.8vw, 1rem);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--bambu-text-muted);
+}
+
+.bambu-stat-value {
+  font-size: clamp(1.2rem, 2.2vw, 3rem);
+  font-weight: 800;
+  color: var(--bambu-text);
+  line-height: 1.1;
+}
+.bambu-stat-value.orange { color: var(--bambu-orange); }
+.bambu-stat-value.red    { color: var(--bambu-red); }
+
+/* ── Grid ────────────────────────────────────────────────────────────────── */
+.bambu-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: clamp(0.5rem, 0.8vw, 1.2rem);
+  justify-content: center;
+}
+
+.bambu-grid.cols-5 > .bambu-card { width: calc((100% - 4 * clamp(0.5rem, 0.8vw, 1.2rem)) / 5); min-width: 0; }
+.bambu-grid.cols-4 > .bambu-card { width: calc((100% - 3 * clamp(0.5rem, 0.8vw, 1.2rem)) / 4); min-width: 0; }
+.bambu-grid.cols-3 > .bambu-card { width: calc((100% - 2 * clamp(0.5rem, 0.8vw, 1.2rem)) / 3); min-width: 0; }
+
+/* ── Kort ────────────────────────────────────────────────────────────────── */
+.bambu-card {
+  background: var(--bambu-card-bg);
+  border-radius: clamp(8px, 1vw, 16px);
+  overflow: hidden;
+  box-shadow: 0 1px 4px var(--bambu-shadow);
+  border-top: clamp(5px, 0.7vh, 9px) solid var(--bambu-mid);
+  position: relative;
+  min-width: 160px;
+  transition: box-shadow .2s, background .3s;
+}
+
+.bambu-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,.18); }
+
+.bambu-card.printing  { border-top-color: var(--bambu-orange); }
+.bambu-card.online    { border-top-color: var(--bambu-green); }
+.bambu-card.offline   { border-top-color: var(--bambu-red); opacity: .7; }
+.bambu-card.failed    { border-top-color: var(--bambu-red);  animation: bambu-blink-red  1.5s ease-in-out infinite; }
+.bambu-card.paused    { border-top-color: #f39c12;           animation: bambu-blink-warn 2s   ease-in-out infinite; }
+.bambu-card.just-done { border-top-color: var(--bambu-green); }
+
+/* ── Bakgrunns-progress (zebra) ──────────────────────────────────────────── */
+.bambu-progress-bg {
+  position: absolute;
+  top: 0; left: 0;
+  height: 100%;
+  z-index: 0;
+  transition: width 2s ease;
+}
+
+.bambu-card.printing .bambu-progress-bg {
+  background-image: linear-gradient(-45deg,
+    rgba(233,100,0,.22) 25%, rgba(255,140,0,.12) 25%,
+    rgba(255,140,0,.12) 50%, rgba(233,100,0,.22) 50%,
+    rgba(233,100,0,.22) 75%, rgba(255,140,0,.12) 75%);
+  background-size: 40px 40px;
+  animation: bambu-zebra 1.5s linear infinite;
+}
+.bambu-card.paused .bambu-progress-bg {
+  background-image: linear-gradient(-45deg,
+    rgba(243,156,18,.2) 25%, rgba(243,156,18,.1) 25%,
+    rgba(243,156,18,.1) 50%, rgba(243,156,18,.2) 50%,
+    rgba(243,156,18,.2) 75%, rgba(243,156,18,.1) 75%);
+  background-size: 40px 40px;
+}
+.bambu-card.failed .bambu-progress-bg {
+  background-image: linear-gradient(-45deg,
+    rgba(231,76,60,.2) 25%, rgba(231,76,60,.1) 25%,
+    rgba(231,76,60,.1) 50%, rgba(231,76,60,.2) 50%,
+    rgba(231,76,60,.2) 75%, rgba(231,76,60,.1) 75%);
+  background-size: 40px 40px;
+}
+.bambu-card.just-done .bambu-progress-bg {
+  width: 100% !important;
+  background: rgba(46,204,113,.15);
+  animation: bambu-done-pulse 2s ease-in-out infinite;
+}
+
+/* Sterkere zebra i mørkt tema */
+.bambu-wrap.bambu-dark .bambu-card.printing .bambu-progress-bg,
+.bambu-wrap:not(.bambu-light) .bambu-card.printing .bambu-progress-bg {
+  background-image: linear-gradient(-45deg,
+    rgba(233,100,0,.32) 25%, rgba(255,160,0,.16) 25%,
+    rgba(255,160,0,.16) 50%, rgba(233,100,0,.32) 50%,
+    rgba(233,100,0,.32) 75%, rgba(255,160,0,.16) 75%);
+  background-size: 40px 40px;
+}
+.bambu-wrap.bambu-dark .bambu-card.paused .bambu-progress-bg,
+.bambu-wrap:not(.bambu-light) .bambu-card.paused .bambu-progress-bg {
+  background-image: linear-gradient(-45deg,
+    rgba(243,156,18,.3) 25%, rgba(243,156,18,.14) 25%,
+    rgba(243,156,18,.14) 50%, rgba(243,156,18,.3) 50%,
+    rgba(243,156,18,.3) 75%, rgba(243,156,18,.14) 75%);
+  background-size: 40px 40px;
+}
+.bambu-wrap.bambu-dark .bambu-card.failed .bambu-progress-bg,
+.bambu-wrap:not(.bambu-light) .bambu-card.failed .bambu-progress-bg {
+  background-image: linear-gradient(-45deg,
+    rgba(231,76,60,.28) 25%, rgba(231,76,60,.13) 25%,
+    rgba(231,76,60,.13) 50%, rgba(231,76,60,.28) 50%,
+    rgba(231,76,60,.28) 75%, rgba(231,76,60,.13) 75%);
+  background-size: 40px 40px;
+}
+.bambu-wrap.bambu-dark .bambu-card.just-done .bambu-progress-bg,
+.bambu-wrap:not(.bambu-light) .bambu-card.just-done .bambu-progress-bg {
+  background: rgba(46,204,113,.22);
+}
+
+@keyframes bambu-zebra      { 0% { background-position: 0 0; } 100% { background-position: 40px 40px; } }
+@keyframes bambu-done-pulse { 0%, 100% { opacity: .6; } 50% { opacity: 1; } }
+@keyframes bambu-blink-red  { 0%, 100% { box-shadow: 0 1px 4px var(--bambu-shadow); } 50% { box-shadow: 0 0 20px rgba(231,76,60,.4); } }
+@keyframes bambu-blink-warn { 0%, 100% { box-shadow: 0 1px 4px var(--bambu-shadow); } 50% { box-shadow: 0 0 16px rgba(243,156,18,.4); } }
+
+/* ── Kortinnhold ─────────────────────────────────────────────────────────── */
+.bambu-card-header {
+  padding: clamp(0.5rem, 0.9vh, 1rem) clamp(0.6rem, 1vw, 1.2rem) clamp(0.3rem, 0.5vh, 0.6rem);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.4rem;
+  position: relative;
+  z-index: 1;
+}
+
+.bambu-card-name {
+  font-size: clamp(0.85rem, 1.3vw, 1.8rem);
+  font-weight: 800;
+  line-height: 1.2;
+}
+.bambu-card-model {
+  font-size: clamp(0.6rem, 0.85vw, 1.1rem);
+  color: var(--bambu-text-muted);
+  margin-top: 2px;
+}
+
+/* ── Badge ───────────────────────────────────────────────────────────────── */
+.bambu-badge {
+  font-size: clamp(0.55rem, 0.8vw, 1rem);
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  padding: clamp(2px, 0.3vh, 5px) clamp(5px, 0.7vw, 10px);
+  border-radius: 20px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.bambu-badge-printing { background: #fff3e0; color: var(--bambu-orange); }
+.bambu-badge-online   { background: #e8f8f0; color: #27ae60; }
+.bambu-badge-offline  { background: #fdecea; color: var(--bambu-red); }
+.bambu-badge-idle     { background: #eef2ff; color: #5c6bc0; }
+.bambu-badge-done     { background: #e8f8f0; color: #27ae60; }
+
+.bambu-wrap.bambu-dark .bambu-badge-printing,
+.bambu-wrap:not(.bambu-light) .bambu-badge-printing { background: rgba(233,100,0,.18); }
+.bambu-wrap.bambu-dark .bambu-badge-online,
+.bambu-wrap:not(.bambu-light) .bambu-badge-online   { background: rgba(46,204,113,.15); }
+.bambu-wrap.bambu-dark .bambu-badge-offline,
+.bambu-wrap:not(.bambu-light) .bambu-badge-offline  { background: rgba(231,76,60,.2); }
+.bambu-wrap.bambu-dark .bambu-badge-idle,
+.bambu-wrap:not(.bambu-light) .bambu-badge-idle     { background: rgba(92,107,192,.2); }
+.bambu-wrap.bambu-dark .bambu-badge-done,
+.bambu-wrap:not(.bambu-light) .bambu-badge-done     { background: rgba(46,204,113,.15); }
+
+/* ── Kortinnhold-body ────────────────────────────────────────────────────── */
+.bambu-card-body {
+  padding: 0 clamp(0.6rem, 1vw, 1.2rem) clamp(0.5rem, 0.8vh, 1rem);
+  position: relative;
+  z-index: 1;
+}
+
+.bambu-thumb {
+  width: 100%;
+  max-height: clamp(70px, 9vh, 140px);
+  object-fit: contain;
+  mix-blend-mode: multiply;
+  margin-bottom: clamp(0.3rem, 0.5vh, 0.6rem);
+}
+.bambu-wrap.bambu-dark .bambu-thumb,
+.bambu-wrap:not(.bambu-light) .bambu-thumb { mix-blend-mode: screen; filter: brightness(.9); }
+
+.bambu-job-name {
+  font-size: clamp(0.7rem, 1vw, 1.3rem);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: clamp(0.2rem, 0.4vh, 0.5rem);
+}
+.bambu-job-name span { color: var(--bambu-text-muted); font-weight: 400; }
+
+.bambu-pct {
+  font-size: clamp(1.3rem, 2.2vw, 3.2rem);
+  font-weight: 800;
+  color: var(--bambu-orange);
+  margin-bottom: clamp(0.15rem, 0.3vh, 0.35rem);
+  line-height: 1.1;
+}
+
+.bambu-time {
+  font-size: clamp(0.8rem, 1.2vw, 1.6rem);
+  font-weight: 700;
+  color: var(--bambu-text-bold);
+  display: flex;
+  align-items: center;
+  gap: clamp(3px, 0.4vw, 8px);
+  padding: clamp(0.15rem, 0.3vh, 0.4rem) 0;
+}
+.bambu-time svg {
+  color: var(--bambu-orange);
+  flex-shrink: 0;
+  width: clamp(13px, 1.4vw, 24px) !important;
+  height: clamp(13px, 1.4vw, 24px) !important;
+}
+.bambu-time-finish {
+  font-weight: 800;
+  font-size: clamp(0.9rem, 1.4vw, 1.9rem);
+}
+
+/* ── Info-rad ────────────────────────────────────────────────────────────── */
+.bambu-info {
+  display: flex;
+  gap: clamp(0.4rem, 0.8vw, 1.2rem);
+  font-size: clamp(0.65rem, 0.95vw, 1.25rem);
+  color: var(--bambu-text-muted);
+  margin-top: clamp(0.25rem, 0.5vh, 0.6rem);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.bambu-info-item {
+  display: flex;
+  align-items: center;
+  gap: clamp(2px, 0.3vw, 5px);
+}
+
+.bambu-info-item svg {
+  flex-shrink: 0;
+  opacity: .75;
+  width: clamp(12px, 1.2vw, 20px) !important;
+  height: clamp(12px, 1.2vw, 20px) !important;
+}
+
+.bambu-ams-dot {
+  display: inline-block;
+  width: clamp(9px, 1vw, 16px);
+  height: clamp(9px, 1vw, 16px);
+  border-radius: 50%;
+  border: 1px solid rgba(128,128,128,.3);
+  vertical-align: middle;
+}
+
+.bambu-idle {
+  font-size: clamp(0.7rem, 1vw, 1.3rem);
+  color: var(--bambu-text-faint);
+  font-style: italic;
+  padding: clamp(0.2rem, 0.4vh, 0.5rem) 0;
+}
+
+/* ── Today-bar ───────────────────────────────────────────────────────────── */
+.bambu-today {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: clamp(1rem, 2.5vw, 4rem);
+  padding: clamp(0.5rem, 1vh, 1.2rem) 1.5rem;
+  margin-top: clamp(0.5rem, 0.8vh, 1rem);
+  background: var(--bambu-card-bg);
+  border-radius: 10px;
+  box-shadow: 0 1px 4px var(--bambu-shadow);
+  flex-wrap: wrap;
+  transition: background .3s;
+}
+
+.bambu-today-item  { display: flex; align-items: baseline; gap: 0.4rem; }
+.bambu-today-label {
+  font-size: clamp(0.55rem, 0.8vw, 1rem);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--bambu-text-muted);
+}
+.bambu-today-value {
+  font-size: clamp(1.4rem, 2.4vw, 3.5rem);
+  font-weight: 800;
+  color: var(--bambu-orange);
+  line-height: 1;
+}
+
+/* ── Statistikk ──────────────────────────────────────────────────────────── */
+.bambu-stats-summary { display: flex; gap: clamp(0.5rem, 1vw, 1.5rem); margin-bottom: clamp(1rem, 1.5vw, 2rem); flex-wrap: wrap; }
+
+.bambu-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(clamp(240px, 22vw, 380px), 1fr));
+  gap: clamp(0.8rem, 1.2vw, 2rem);
+}
+
+.bambu-stats-card {
+  background: var(--bambu-card-bg);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 1px 4px var(--bambu-shadow);
+  border-top: clamp(5px, 0.6vh, 9px) solid var(--bambu-orange);
+  transition: background .3s;
+}
+
+.bambu-stats-card-header    { padding: clamp(0.7rem, 1.2vw, 1.5rem); border-bottom: 1px solid var(--bambu-mid); }
+.bambu-stats-card-name      { font-size: clamp(0.9rem, 1.3vw, 1.8rem); font-weight: 800; }
+.bambu-stats-card-model     { font-size: clamp(0.6rem, 0.85vw, 1.1rem); color: var(--bambu-text-muted); margin-top: 2px; }
+.bambu-stats-card-body      { padding: clamp(0.6rem, 1vw, 1.4rem); }
+.bambu-stats-grid-inner     { display: grid; grid-template-columns: repeat(2, 1fr); gap: clamp(0.4rem, 0.7vw, 1rem); }
+.bambu-stats-item-label     { font-size: clamp(0.55rem, 0.8vw, 1rem); font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--bambu-text-muted); }
+.bambu-stats-item-value     { font-size: clamp(1rem, 1.6vw, 2.2rem); font-weight: 800; }
+
+.bambu-rate-bar  { height: clamp(6px, 0.7vh, 10px); background: var(--bambu-red); border-radius: 4px; overflow: hidden; margin-top: clamp(0.5rem, 0.8vh, 1rem); }
+.bambu-rate-fill { height: 100%; background: var(--bambu-green); border-radius: 4px; }
+.bambu-rate-nums { display: flex; justify-content: space-between; font-size: clamp(0.55rem, 0.8vw, 1rem); color: var(--bambu-text-muted); margin-top: 3px; }
+
+/* ── Advarsel / info-boks ────────────────────────────────────────────────── */
+.bambu-stats-warning {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  font-size: clamp(0.65rem, 0.9vw, 1rem);
+  color: #92650a;
+  background: #fff3cd;
+  border: 1px solid #ffc107;
+  border-radius: 8px;
+  padding: clamp(0.5rem, 0.7vw, 0.9rem) clamp(0.75rem, 1vw, 1.25rem);
+  margin-bottom: clamp(0.75rem, 1.2vw, 1.5rem);
+}
+.bambu-wrap.bambu-dark .bambu-stats-warning,
+.bambu-wrap:not(.bambu-light):is(@media (prefers-color-scheme: dark)) .bambu-stats-warning {
+  color: #ffe08a;
+  background: rgba(255,193,7,.12);
+  border-color: rgba(255,193,7,.35);
+}
+@media (prefers-color-scheme: dark) {
+  .bambu-wrap:not(.bambu-light) .bambu-stats-warning {
+    color: #ffe08a;
+    background: rgba(255,193,7,.12);
+    border-color: rgba(255,193,7,.35);
+  }
+}
+.bambu-wrap.bambu-dark .bambu-stats-warning {
+  color: #ffe08a;
+  background: rgba(255,193,7,.12);
+  border-color: rgba(255,193,7,.35);
+}
+
+/* ── Sorteringsknapper ───────────────────────────────────────────────────── */
+.bambu-sort-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: clamp(0.3rem, 0.5vw, 0.75rem);
+  margin-bottom: clamp(0.75rem, 1.2vw, 1.5rem);
+}
+
+.bambu-sort-btn {
+  font-family: 'Jura', sans-serif;
+  font-size: clamp(0.6rem, 0.85vw, 1rem);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: clamp(0.3rem, 0.4vw, 0.6rem) clamp(0.6rem, 0.9vw, 1.2rem);
+  border-radius: 6px;
+  border: 1px solid var(--bambu-mid);
+  background: var(--bambu-card-bg);
+  color: var(--bambu-text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.35em;
+  transition: background .15s, color .15s, border-color .15s;
+}
+
+.bambu-sort-btn:hover {
+  border-color: var(--bambu-orange);
+  color: var(--bambu-orange);
+}
+
+.bambu-sort-btn.active {
+  background: var(--bambu-orange);
+  border-color: var(--bambu-orange);
+  color: #ffffff;
+}
+
+.bambu-sort-arrow {
+  font-size: 0.8em;
+  opacity: 0.8;
+}
+
+.bambu-export-btn {
+  margin-left: auto;
+  text-decoration: none;
+  color: var(--bambu-text-muted);
+  border-color: var(--bambu-mid);
+}
+.bambu-export-btn:hover {
+  color: var(--bambu-orange);
+  border-color: var(--bambu-orange);
+}
+
+/* ── Tilpasset lenkeknapp (øverst til høyre) ─────────────────────────────── */
+.bambu-wrap {
+  position: relative;
+}
+.bambu-link-btn {
+  position: absolute;
+  top: clamp(0.5rem, 0.8vw, 1rem);
+  right: clamp(0.5rem, 0.8vw, 1rem);
+  font-family: 'Jura', sans-serif;
+  font-size: clamp(0.6rem, 0.8vw, 0.95rem);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  text-decoration: none;
+  padding: clamp(0.25rem, 0.35vw, 0.5rem) clamp(0.6rem, 0.8vw, 1rem);
+  border-radius: 6px;
+  border: 1px solid var(--bambu-orange);
+  color: var(--bambu-orange);
+  background: transparent;
+  transition: background .15s, color .15s;
+  z-index: 10;
+}
+.bambu-link-btn:hover {
+  background: var(--bambu-orange);
+  color: #ffffff;
+  text-decoration: none;
+}
