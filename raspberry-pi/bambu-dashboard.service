@@ -1,0 +1,24 @@
+# ─────────────────────────────────────────────────────────────────
+#  Bambu Lab Dashboard – systemd-tjeneste
+#  Kopiert og tilpasset automatisk av setup.sh
+#  Manuell installasjon:
+#    sudo cp bambu-dashboard.service /etc/systemd/system/
+#    sudo systemctl daemon-reload
+#    sudo systemctl enable --now bambu-dashboard
+# ─────────────────────────────────────────────────────────────────
+[Unit]
+Description=Bambu Lab 3D Print Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/bambu-dashboard
+ExecStart=/home/pi/bambu-dashboard/.venv/bin/python app.py
+Restart=on-failure
+RestartSec=10
+EnvironmentFile=/home/pi/bambu-dashboard/.env
+
+[Install]
+WantedBy=multi-user.target
