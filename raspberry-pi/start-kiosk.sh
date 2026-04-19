@@ -57,4 +57,9 @@ exec "$CHROMIUM" \
     --autoplay-policy=no-user-gesture-required \
     --check-for-update-interval=31536000 \
     --start-fullscreen \
+    --disable-gpu \
+    --disable-software-rasterizer \
+    --disable-dev-shm-usage \
+    --no-sandbox \
+    2>/dev/null \
     "$URL"
