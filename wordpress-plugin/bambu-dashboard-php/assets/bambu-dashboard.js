@@ -72,8 +72,8 @@
     return g >= 1000 ? (g / 1000).toFixed(1) + 'kg' : Math.round(g) + 'g';
   }
 
-  function formatMeters(g) {
-    const m = (g / 1000) * 330;
+  function formatMeters(cm) {
+    const m = cm / 100;
     return m >= 1000 ? (m / 1000).toFixed(1) + 'km' : Math.round(m) + 'm';
   }
 
@@ -277,7 +277,7 @@
           '<div class="bambu-today-item"><span class="bambu-today-label">I dag</span></div>'
           + '<div class="bambu-today-item"><span class="bambu-today-value">' + d.prints + '</span><span class="bambu-today-label">prints</span></div>'
           + '<div class="bambu-today-item"><span class="bambu-today-value">' + Math.round(d.weight_g) + 'g</span><span class="bambu-today-label">filament</span></div>'
-          + '<div class="bambu-today-item"><span class="bambu-today-value">' + formatMeters(d.weight_g) + '</span><span class="bambu-today-label">lengde</span></div>';
+          + '<div class="bambu-today-item"><span class="bambu-today-value">' + formatMeters(d.length_cm ?? 0) + '</span><span class="bambu-today-label">lengde</span></div>';
       } catch (e) {}
     }
 
@@ -305,7 +305,7 @@
     ];
 
     function getSortValue(d, key) {
-      if (key === '_meters') return (d.total_weight_g / 1000) * 330;
+      if (key === '_meters') return d.total_length_cm ?? 0;
       return d[key] ?? 0;
     }
 
@@ -343,7 +343,7 @@
           + statsItem('Prints',   String(d.total_prints), 'color:var(--bambu-orange)')
           + statsItem('Printtid', formatDuration(d.total_time_s))
           + statsItem('Filament', formatWeight(d.total_weight_g))
-          + statsItem('Lengde',   formatMeters(d.total_weight_g))
+          + statsItem('Lengde',   formatMeters(d.total_length_cm ?? 0))
           + '</div>'
           + '<div class="bambu-rate-bar"><div class="bambu-rate-fill" style="width:' + r + '%"></div></div>'
           + '<div class="bambu-rate-nums"><span>' + d.successful + ' vellykket</span><span>' + r + '%</span><span>' + d.failed + ' feilet</span></div>'

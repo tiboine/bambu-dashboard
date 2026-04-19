@@ -3,7 +3,7 @@
  * Plugin Name: Bambu Lab 3D Print Dashboard (PHP)
  * Plugin URI: https://makerspaceringebu.no
  * Description: Sanntids 3D-print dashboard for Bambu Lab – ren PHP, ingen ekstern server nødvendig. Bruk [bambu_dashboard] og [bambu_stats].
- * Version: 1.1.4
+ * Version: 1.1.5
  * Author: Makerspace Ringebu
  * License: GPL v2 or later
  * Text Domain: bambu-dashboard-php
@@ -214,16 +214,17 @@ class BambuDashboardPHP {
         if (is_wp_error($resp)) return ['prints' => 0, 'weight_g' => 0, 'time_s' => 0];
 
         $today = gmdate('Y-m-d');
-        $prints = $weight = $time_s = 0;
+        $prints = $weight = $time_s = $length_cm = 0;
         foreach (json_decode(wp_remote_retrieve_body($resp), true)['hits'] ?? [] as $t) {
             if (substr($t['startTime'] ?? '', 0, 10) === $today) {
                 $prints++;
-                $weight += $t['weight']   ?? 0;
-                $time_s += $t['costTime'] ?? 0;
+                $weight    += $t['weight']   ?? 0;
+                $time_s    += $t['costTime'] ?? 0;
+                $length_cm += $t['length']   ?? 0;
             }
         }
 
-        $result = ['prints' => $prints, 'weight_g' => $weight, 'time_s' => $time_s];
+        $result = ['prints' => $prints, 'weight_g' => $weight, 'time_s' => $time_s, 'length_cm' => $length_cm];
         set_transient('bambu_php_today', $result, 60);
         return $result;
     }
@@ -353,20 +354,22 @@ class BambuDashboardPHP {
         $did = $task['deviceId'] ?? 'unknown';
         if (!isset($stats[$did])) {
             $stats[$did] = [
-                'name'           => $dev_info[$did]['name']  ?? $did,
-                'model'          => $dev_info[$did]['model'] ?? 'Ukjent',
-                'total_prints'   => 0,
-                'successful'     => 0,
-                'failed'         => 0,
-                'total_time_s'   => 0,
-                'total_weight_g' => 0,
+                'name'            => $dev_info[$did]['name']  ?? $did,
+                'model'           => $dev_info[$did]['model'] ?? 'Ukjent',
+                'total_prints'    => 0,
+                'successful'      => 0,
+                'failed'          => 0,
+                'total_time_s'    => 0,
+                'total_weight_g'  => 0,
+                'total_length_cm' => 0,
             ];
         }
         $s = &$stats[$did];
         $s['total_prints']++;
         ($task['status'] ?? 0) === 2 ? $s['successful']++ : $s['failed']++;
-        $s['total_time_s']   += $task['costTime'] ?? 0;
-        $s['total_weight_g'] += $task['weight']   ?? 0;
+        $s['total_time_s']    += $task['costTime'] ?? 0;
+        $s['total_weight_g']  += $task['weight']   ?? 0;
+        $s['total_length_cm'] += $task['length']   ?? 0;
     }
 
     /** Hent enhetsnavn og modell */
@@ -438,10 +441,12 @@ class BambuDashboardPHP {
         }
 
         $rows   = [];
-        $rows[] = ['Printer', 'Modell', 'Prints', 'Vellykket', 'Feilet', 'Suksessrate %', 'Printtid (timer)', 'Filament (g)', 'Filament (kg)'];
+        $rows[] = ['Printer', 'Modell', 'Prints', 'Vellykket', 'Feilet', 'Suksessrate %', 'Printtid (timer)', 'Filament (g)', 'Filament (kg)', 'Lengde (m)', 'Lengde (km)'];
         foreach ($stats['devices'] as $d) {
-            $rate  = $d['total_prints'] > 0 ? round($d['successful'] / $d['total_prints'] * 100, 1) : 0;
-            $hours = round($d['total_time_s'] / 3600, 1);
+            $rate   = $d['total_prints'] > 0 ? round($d['successful'] / $d['total_prints'] * 100, 1) : 0;
+            $hours  = round($d['total_time_s'] / 3600, 1);
+            $len_m  = round(($d['total_length_cm'] ?? 0) / 100, 1);
+            $len_km = round(($d['total_length_cm'] ?? 0) / 100000, 3);
             $rows[] = [
                 $d['name'],
                 $d['model'],
@@ -452,6 +457,8 @@ class BambuDashboardPHP {
                 $hours,
                 round($d['total_weight_g'], 0),
                 round($d['total_weight_g'] / 1000, 3),
+                $len_m,
+                $len_km,
             ];
         }
 
