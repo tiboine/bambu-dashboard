@@ -17,42 +17,63 @@ TOKEN_FILE  = Path(__file__).parent / ".token.json"
 STATS_FILE  = Path(__file__).parent / "stats_store.json"
 
 # ── Lokal stats-lagring ──────────────────────────────────────────
-# Struktur: { "stats": {dev_id: {...}}, "boundary": last_id, "complete": bool, "newest": id }
-_stats_lock  = threading.Lock()
+# Full task-liste lagres lokalt. Bambu API brukes kun for å fylle hull.
+# Schema: {
+#   "tasks":   { "<id>": {id, deviceId, title, startTime, costTime, weight, length, status, cover} },
+#   "devices": { "<dev_id>": {name, model} },
+#   "sync":    { boundary, complete, newest, api_total, last_sync }
+# }
+_sync_lock = threading.Lock()   # én sync av gangen
+
+def default_stats_store():
+    return {
+        "tasks":   {},
+        "devices": {},
+        "sync":    {"boundary": None, "complete": False, "newest": None, "api_total": 0, "last_sync": None},
+    }
 
 def load_stats_store():
     try:
         if STATS_FILE.exists():
-            return json.loads(STATS_FILE.read_text())
+            data = json.loads(STATS_FILE.read_text())
+            if "tasks" in data:
+                return data
+            # Migrer fra gammel aggregat-only schema: behold enhetsnavn, resync tasks
+            migrated = default_stats_store()
+            for dev_id, s in data.get("stats", {}).items():
+                migrated["devices"][dev_id] = {
+                    "name":  s.get("name", dev_id),
+                    "model": s.get("model", "Ukjent"),
+                }
+            return migrated
     except Exception as e:
         print(f"[Stats] Kunne ikke lese stats_store.json: {e}")
-    return {"stats": {}, "boundary": None, "complete": False, "newest": None, "api_total": 0}
+    return default_stats_store()
 
 def save_stats_store(store):
     try:
-        STATS_FILE.write_text(json.dumps(store))
+        tmp = STATS_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(store))
+        tmp.replace(STATS_FILE)  # atomisk: lesere ser enten gammel eller ny fil
     except Exception as e:
         print(f"[Stats] Kunne ikke lagre stats_store.json: {e}")
 
-def merge_task_into_store(store, task, devices):
-    dev_id = task.get("deviceId", "unknown")
-    if dev_id not in store["stats"]:
-        store["stats"][dev_id] = {
-            "name":            devices.get(dev_id, {}).get("name", dev_id),
-            "model":           devices.get(dev_id, {}).get("model", "Ukjent"),
-            "total_prints":    0,
-            "successful":      0,
-            "failed":          0,
-            "total_time_s":    0,
-            "total_weight_g":  0,
-            "total_length_cm": 0,
-        }
-    s = store["stats"][dev_id]
-    s["total_prints"]    += 1
-    s["successful" if task.get("status") == 2 else "failed"] += 1
-    s["total_time_s"]    += task.get("costTime", 0) or 0
-    s["total_weight_g"]  += task.get("weight", 0)   or 0
-    s["total_length_cm"] += task.get("length", 0)   or 0
+def merge_task_into_store(store, task):
+    tid = task.get("id")
+    if tid is None:
+        return
+    store["tasks"][str(tid)] = {
+        "id":        tid,
+        "deviceId":  task.get("deviceId", "unknown"),
+        "title":     task.get("title") or task.get("name") or "",
+        "startTime": task.get("startTime", ""),
+        "endTime":   task.get("endTime", ""),
+        "costTime":  task.get("costTime", 0) or 0,
+        "weight":    task.get("weight", 0)   or 0,
+        "length":    task.get("length", 0)   or 0,
+        "status":    task.get("status", 0),
+        "cover":     task.get("cover", ""),
+    }
 
 def fetch_task_page_raw(after=None):
     """Henter én side med tasks direkte fra Bambu API."""
@@ -70,25 +91,41 @@ def fetch_task_page_raw(after=None):
     return data.get("hits", []), data.get("total", 0)
 
 def sync_stats_store():
-    """Synkroniserer lokal stats-lagring med Bambu API. Kjøres i bakgrunn."""
+    """Fyll lokal lagring fra Bambu API. Server er kun kilde for nye/manglende tasks."""
     if not state["token"]:
         return
-    with _stats_lock:
+    if not _sync_lock.acquire(blocking=False):
+        return  # en sync kjører allerede
+    try:
         store = load_stats_store()
         devices = state.get("devices", {})
 
-        # Hent ferske tasks (alltid)
-        recent, api_total = fetch_task_page_raw()
+        # Oppdater enhets-metadata fra bind-API
+        for dev_id, dev in devices.items():
+            store["devices"][dev_id] = {
+                "name":  dev.get("name", dev_id),
+                "model": dev.get("model", "Ukjent"),
+            }
+
+        # Hent ferske tasks (nyeste først)
+        try:
+            recent, api_total = fetch_task_page_raw()
+        except Exception as e:
+            print(f"[Stats] Kunne ikke hente tasks: {e}")
+            return
         if api_total:
-            store["api_total"] = api_total
+            store["sync"]["api_total"] = api_total
         if not recent:
+            save_stats_store(store)
             return
 
+        for task in recent:
+            merge_task_into_store(store, task)
         boundary_id = recent[-1].get("id")
 
-        # Historikk: hent alt eldre enn de ferske, med loop-deteksjon
-        if not store["complete"] and boundary_id:
-            after = store["boundary"] or boundary_id
+        # Historikk: fyll bakover til komplett, med loop-deteksjon og tidsbudsjett
+        if not store["sync"]["complete"] and boundary_id:
+            after = store["sync"]["boundary"] or boundary_id
             deadline = time.time() + 25
             seen = set()
             while time.time() < deadline:
@@ -97,40 +134,70 @@ def sync_stats_store():
                 except Exception:
                     break
                 if not hits:
-                    store["complete"] = True
+                    store["sync"]["complete"] = True
                     break
                 first_id = hits[0].get("id")
                 if first_id in seen:
-                    store["complete"] = True
+                    store["sync"]["complete"] = True
                     break
                 seen.add(first_id)
                 for task in hits:
-                    merge_task_into_store(store, task, devices)
-                store["boundary"] = hits[-1].get("id")
+                    merge_task_into_store(store, task)
+                store["sync"]["boundary"] = hits[-1].get("id")
                 if len(hits) < 100:
-                    store["complete"] = True
+                    store["sync"]["complete"] = True
                     break
-                after = store["boundary"]
-            if not store.get("newest"):
-                store["newest"] = boundary_id
+                after = store["sync"]["boundary"]
 
-        # Oppdater med nye tasks siden sist
-        elif store["complete"] and store.get("newest") != boundary_id:
-            stop = store["newest"]
-            for task in recent:
-                if task.get("id") == stop:
-                    break
-                merge_task_into_store(store, task, devices)
-            store["newest"] = boundary_id
-
-        # Oppdater enhetsnavn (kan ha endret seg)
-        for dev_id, s in store["stats"].items():
-            if dev_id in devices:
-                s["name"]  = devices[dev_id].get("name", s["name"])
-                s["model"] = devices[dev_id].get("model", s["model"])
+        store["sync"]["newest"]    = boundary_id
+        store["sync"]["last_sync"] = time.strftime("%Y-%m-%dT%H:%M:%S")
 
         save_stats_store(store)
-        print(f"[Stats] Lagret. API-total: {store['api_total']}, komplett: {store['complete']}")
+        print(f"[Stats] Lagret {len(store['tasks'])} tasks. API-total: {store['sync']['api_total']}, komplett: {store['sync']['complete']}")
+    finally:
+        _sync_lock.release()
+
+
+def aggregate_stats(store):
+    """Beregn per-enhet aggregater + siste tasks fra lagret data."""
+    agg = {}
+    for task in store.get("tasks", {}).values():
+        dev_id = task.get("deviceId", "unknown")
+        if dev_id not in agg:
+            meta = store.get("devices", {}).get(dev_id, {})
+            agg[dev_id] = {
+                "device_id":       dev_id,
+                "name":            meta.get("name", dev_id),
+                "model":           meta.get("model", "Ukjent"),
+                "total_prints":    0,
+                "successful":      0,
+                "failed":          0,
+                "total_time_s":    0,
+                "total_weight_g":  0,
+                "total_length_cm": 0,
+                "_tasks":          [],
+            }
+        d = agg[dev_id]
+        d["total_prints"] += 1
+        d["successful" if task.get("status") == 2 else "failed"] += 1
+        d["total_time_s"]    += task.get("costTime", 0) or 0
+        d["total_weight_g"]  += task.get("weight", 0)   or 0
+        d["total_length_cm"] += task.get("length", 0)   or 0
+        d["_tasks"].append(task)
+
+    for d in agg.values():
+        d["_tasks"].sort(key=lambda t: t.get("startTime", ""), reverse=True)
+        d["tasks"] = [
+            {
+                "title":      t.get("title", ""),
+                "status":     t.get("status", 0),
+                "start_time": t.get("startTime", ""),
+                "cost_time":  t.get("costTime", 0),
+            }
+            for t in d["_tasks"][:10]
+        ]
+        del d["_tasks"]
+    return agg
 
 
 @app.after_request
@@ -540,6 +607,8 @@ def init_connection():
             fetch_device_list()
             fetch_task_covers()
             start_mqtt()
+            # Kjør første stats-sync i bakgrunn slik at dagens tall fylles ASAP
+            threading.Thread(target=sync_stats_store, daemon=True).start()
     except Exception as e:
         state["error"] = str(e)
         print(f"[Feil ved oppstart] {e}")
@@ -586,36 +655,28 @@ def api_status():
 
 @app.route("/api/today")
 def api_today():
-    """Hent dagens printstatistikk."""
-    if not state["token"]:
-        return jsonify({"prints": 0, "weight_g": 0, "time_s": 0})
-
-    try:
-        from datetime import datetime, timezone
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-        resp = requests.get(
-            f"{BAMBU_API}/v1/user-service/my/tasks",
-            headers=headers(),
-            params={"limit": 100},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        tasks = resp.json().get("hits", [])
-
-        prints = 0
-        weight = 0
-        time_s = 0
-        for t in tasks:
-            start = t.get("startTime", "")
-            if start and start[:10] == today:
-                prints += 1
-                weight += t.get("weight", 0) or 0
-                time_s += t.get("costTime", 0) or 0
-
-        return jsonify({"prints": prints, "weight_g": weight, "time_s": time_s})
-    except Exception as e:
-        return jsonify({"prints": 0, "weight_g": 0, "time_s": 0, "error": str(e)})
+    """Hent dagens printstatistikk fra lokal lagring."""
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    store = load_stats_store()
+    prints = 0
+    weight = 0
+    time_s = 0
+    length_cm = 0
+    for task in store.get("tasks", {}).values():
+        start = task.get("startTime", "")
+        if start and start[:10] == today:
+            prints    += 1
+            weight    += task.get("weight", 0)   or 0
+            time_s    += task.get("costTime", 0) or 0
+            length_cm += task.get("length", 0)   or 0
+    return jsonify({
+        "prints":    prints,
+        "weight_g":  weight,
+        "time_s":    time_s,
+        "length_cm": length_cm,
+        "last_sync": store.get("sync", {}).get("last_sync"),
+    })
 
 
 @app.route("/stats")
@@ -626,16 +687,15 @@ def stats_page():
 @app.route("/api/stats")
 def api_stats():
     """Returner akkumulert statistikk fra lokal lagring."""
-    if not state["token"]:
-        return jsonify({"error": "Ikke innlogget"}), 401
-    with _stats_lock:
-        store = load_stats_store()
-    total = sum(d["total_prints"] for d in store["stats"].values())
+    store = load_stats_store()
+    agg = aggregate_stats(store)
+    total = sum(d["total_prints"] for d in agg.values())
     return jsonify({
-        "devices":       list(store["stats"].values()),
+        "devices":       list(agg.values()),
         "total_tasks":   total,
-        "api_total":     store.get("api_total", 0),
-        "data_complete": store.get("complete", False),
+        "api_total":     store.get("sync", {}).get("api_total", 0),
+        "data_complete": store.get("sync", {}).get("complete", False),
+        "last_sync":     store.get("sync", {}).get("last_sync"),
     })
 
 
@@ -688,6 +748,7 @@ def api_verify():
         fetch_device_list()
         fetch_task_covers()
         start_mqtt()
+        threading.Thread(target=sync_stats_store, daemon=True).start()
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400

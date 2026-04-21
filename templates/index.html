@@ -209,7 +209,7 @@
       justify-content: center;
       zoom: 1.25;
     }
-    body.fit-screen .card { min-height: 0; }
+    body.fit-screen .card { min-height: 175px; }
     body.fit-screen footer { display: none; }
 
     /* Kompakte kort i fit-screen */
@@ -251,6 +251,7 @@
       box-shadow: 0 1px 4px var(--shadow);
       transition: box-shadow .2s, background .3s;
       position: relative;
+      min-height: 260px;
     }
 
     .card-header {
@@ -277,7 +278,7 @@
       position: absolute;
       top: 0; left: 0;
       height: 100%;
-      transition: width 2s ease;
+      transition: width 4.8s linear;
       z-index: 0;
     }
 
@@ -794,7 +795,7 @@
     const infoHtml = '';
 
     return `
-      <div class="card ${cls}">
+      <div class="card ${cls}" data-dev="${p.id}">
         ${progressBg}
         <div class="card-header">
           <div>
@@ -805,6 +806,36 @@
         ${thumbHtml}
         <div class="card-body">${bodyHtml}${infoHtml}</div>
       </div>`;
+  }
+
+  // Render som bevarer .card-progress-bg-elementet på tvers av refresh,
+  // slik at CSS-transitionen på width faktisk trigges (ellers blir hvert
+  // refresh et nytt DOM-element og transitionen gjør ingenting).
+  function applyCards(grid, printers) {
+    const existing = new Map();
+    grid.querySelectorAll('.card[data-dev]').forEach(c => existing.set(c.dataset.dev, c));
+
+    const tmp = document.createElement('div');
+    tmp.innerHTML = printers.map(renderCard).join('');
+    const newCards = Array.from(tmp.children);
+
+    newCards.forEach(newEl => {
+      const old = existing.get(newEl.dataset.dev);
+      if (!old) return;
+      const oldBg = old.querySelector('.card-progress-bg');
+      const newBg = newEl.querySelector('.card-progress-bg');
+      if (!oldBg || !newBg) return;
+      // Flytt gammel bg inn i nytt kort, og animer til ny bredde på neste frame
+      const targetWidth   = newBg.style.width;
+      const targetAnimDur = newBg.style.animationDuration;
+      const targetCls     = newBg.className;
+      newBg.replaceWith(oldBg);
+      oldBg.className = targetCls;
+      oldBg.style.animationDuration = targetAnimDur;
+      requestAnimationFrame(() => { oldBg.style.width = targetWidth; });
+    });
+
+    grid.replaceChildren(...newCards);
   }
 
   function renderSummary(printers) {
@@ -895,7 +926,7 @@
       const sorted = sortPrinters(data.printers);
       lastPrinters = sorted;
       summary.innerHTML = renderSummary(sorted);
-      grid.innerHTML = sorted.map(renderCard).join('');
+      applyCards(grid, sorted);
 
       if (autoMode) applyAutoGrid();
     } catch (e) { console.error('Kunne ikke hente status:', e); }
