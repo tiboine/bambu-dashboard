@@ -295,6 +295,8 @@
     let allDevs = [];
     let sortKey = 'total_prints';
     let sortDir = -1; // -1 = desc, 1 = asc
+    let currentTab = 'stats';
+    let exportBtnHtml = '';
 
     const sortDefs = [
       { key: 'name',           label: 'Navn',    dir: 1  },
@@ -356,8 +358,7 @@
     function render() {
       const grid = el.querySelector('.bambu-stats-grid-wrap');
       if (grid) grid.innerHTML = renderGrid();
-      // Oppdater sort-knapper
-      el.querySelectorAll('.bambu-sort-btn').forEach(btn => {
+      el.querySelectorAll('.bambu-sort-btn[data-key]').forEach(btn => {
         const active = btn.dataset.key === sortKey;
         btn.classList.toggle('active', active);
         if (active) {
@@ -368,64 +369,189 @@
       });
     }
 
-    async function load() {
-      try {
-        const res  = await fetch(REST + '/stats');
-        const data = await res.json();
-        if (data.error) { el.innerHTML = '<div class="bambu-loading">Feil: ' + data.error + '</div>'; relink(); return; }
+    function renderTabs() {
+      return '<div class="bambu-tabs">'
+        + '<button class="bambu-tab-btn' + (currentTab === 'stats' ? ' active' : '') + '" data-tab="stats">Per printer</button>'
+        + '<button class="bambu-tab-btn' + (currentTab === 'history' ? ' active' : '') + '" data-tab="history">Alle prints</button>'
+        + '</div>';
+    }
 
-        allDevs = data.devices || [];
-        let tp = 0, ts = 0, tf = 0, tt = 0, tw = 0;
-        allDevs.forEach(d => { tp += d.total_prints; ts += d.successful; tf += d.failed; tt += d.total_time_s; tw += d.total_weight_g; });
-        const rate = tp > 0 ? Math.round(ts / tp * 100) : 0;
+    function buildStatsBody() {
+      return '<div class="bambu-sort-bar">' + renderSortBar() + exportBtnHtml + '</div>'
+        + '<div class="bambu-stats-grid-wrap">' + renderGrid() + '</div>';
+    }
 
-        // Vis advarsel hvis historikken ikke er komplett ennå
-        const apiTotal = data.api_total || 0;
-        const isComplete = data.data_complete === true;
-        let warning = '';
-        if (!isComplete) {
-          warning = '<div class="bambu-stats-warning">'
-            + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>'
-            + ' Historikken lastes inn – tallene er ikke komplette ennå. Last inn siden på nytt om litt.'
-            + (apiTotal > 0 ? ' (Bambu rapporterer ' + apiTotal.toLocaleString('no') + ' tasks totalt)' : '')
-            + '</div>';
-        }
-
-        let html = warning + '<div class="bambu-stats-summary">'
-          + stat('Prints', tp, 'orange')
-          + stat('Vellykket', ts, 'color:var(--bambu-green)')
-          + stat('Feilet', tf, 'color:var(--bambu-red)')
-          + stat('Suksessrate', rate + '%', 'color:var(--bambu-green)')
-          + stat('Printtid', formatDuration(tt))
-          + stat('Filament', formatWeight(tw))
-          + '</div>';
-
-        const exportUrl = REST + '/export';
-        html += '<div class="bambu-sort-bar">' + renderSortBar(true) +
-          '<a class="bambu-sort-btn bambu-export-btn" href="' + exportUrl + '" download>' +
-          '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>' +
-          ' Last ned CSV</a></div>';
-        html += '<div class="bambu-stats-grid-wrap">' + renderGrid() + '</div>';
-        el.innerHTML = html;
-        relink();
-
-        // Knytt klikk-hendelser til sort-knapper
-        el.querySelectorAll('.bambu-sort-btn').forEach(btn => {
-          btn.addEventListener('click', () => {
-            const key = btn.dataset.key;
-            if (sortKey === key) {
-              sortDir *= -1;
-            } else {
-              sortKey = key;
-              sortDir = sortDefs.find(s => s.key === key).dir;
-            }
-            render();
-          });
+    function bindSortBtns() {
+      el.querySelectorAll('.bambu-sort-btn[data-key]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const key = btn.dataset.key;
+          if (sortKey === key) sortDir *= -1;
+          else { sortKey = key; sortDir = sortDefs.find(s => s.key === key).dir; }
+          render();
         });
+      });
+    }
 
+    function switchTab() {
+      el.querySelectorAll('.bambu-tab-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.tab === currentTab);
+      });
+      const body = el.querySelector('.bambu-tab-body');
+      if (!body) return;
+      if (currentTab === 'stats') {
+        body.innerHTML = buildStatsBody();
+        bindSortBtns();
+      } else {
+        body.innerHTML = '<div class="bambu-history-wrap"><div class="bambu-loading">Laster historikk...</div></div>';
+        loadHistory(1);
+      }
+    }
+
+    function formatHistDate(dt) {
+      if (!dt) return '–';
+      const p = dt.split(/[- :]/);
+      const d = new Date(+p[0], +p[1] - 1, +p[2], +p[3], +p[4]);
+      const mo = ['jan','feb','mar','apr','mai','jun','jul','aug','sep','okt','nov','des'];
+      return d.getDate() + '. ' + mo[d.getMonth()] + ' '
+        + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    }
+
+    function parseDt(dt) {
+      if (!dt) return null;
+      const p = dt.split(/[- :]/);
+      return new Date(+p[0], +p[1] - 1, +p[2], +p[3] || 0, +p[4] || 0, +p[5] || 0);
+    }
+
+    function actualDurS(p) {
+      const s = parseDt(p.start_time), e = parseDt(p.end_time);
+      if (s && e && e > s) return Math.round((e - s) / 1000);
+      return p.cost_time_s;
+    }
+
+    function renderHistoryTable(prints) {
+      if (!prints || !prints.length) return '<div class="bambu-loading">Ingen prints funnet.</div>';
+      let html = '<div class="bambu-hist-table-wrap"><table class="bambu-hist-table">'
+        + '<thead><tr><th>Dato</th><th>Printer</th><th>Tittel</th><th>Status</th><th>Tid</th><th>Filament</th></tr></thead><tbody>';
+      prints.forEach(p => {
+        const ok  = p.status === 2;
+        const dur = formatDuration(actualDurS(p));
+        const fil = ok ? formatWeight(p.weight_g) : '–';
+        html += '<tr class="' + (ok ? '' : 'bambu-hist-fail') + '">'
+          + '<td class="bambu-hist-date">' + formatHistDate(p.start_time) + '</td>'
+          + '<td class="bambu-hist-printer">' + p.device_name + '</td>'
+          + '<td class="bambu-hist-title">' + (p.title || '–') + '</td>'
+          + '<td><span class="bambu-badge ' + (ok ? 'bambu-badge-done' : 'bambu-badge-offline') + '">'
+          + (ok ? '✓' : '✗') + '</span></td>'
+          + '<td class="bambu-hist-meta">' + dur + '</td>'
+          + '<td class="bambu-hist-meta">' + fil + '</td>'
+          + '</tr>';
+      });
+      html += '</tbody></table></div>';
+      return html;
+    }
+
+    function renderPagination(page, pages, total) {
+      const tot = '<div class="bambu-hist-total">' + total.toLocaleString('no') + ' prints totalt</div>';
+      if (pages <= 1) return tot;
+      return '<div class="bambu-hist-pager">'
+        + '<button class="bambu-sort-btn" data-page="' + (page - 1) + '"' + (page <= 1 ? ' disabled' : '') + '>← Forrige</button>'
+        + '<span class="bambu-hist-pagenum">Side ' + page + ' av ' + pages + '</span>'
+        + '<button class="bambu-sort-btn" data-page="' + (page + 1) + '"' + (page >= pages ? ' disabled' : '') + '>Neste →</button>'
+        + '</div>' + tot;
+    }
+
+    async function loadHistory(page) {
+      const wrap = el.querySelector('.bambu-history-wrap');
+      if (!wrap) return;
+      try {
+        const res  = await fetch(REST + '/prints?per_page=50&page=' + page);
+        const data = await res.json();
+        wrap.innerHTML = renderHistoryTable(data.prints) + renderPagination(page, data.pages, data.total);
+        wrap.querySelectorAll('button[data-page]').forEach(btn => {
+          btn.addEventListener('click', () => loadHistory(+btn.dataset.page));
+        });
       } catch (e) {
-        el.innerHTML = '<div class="bambu-loading">Kunne ikke laste statistikk.</div>';
+        wrap.innerHTML = '<div class="bambu-loading">Kunne ikke laste historikk.</div>';
+      }
+    }
+
+    function buildSummaryHTML(devs) {
+      let tp = 0, ts = 0, tf = 0, tt = 0, tw = 0;
+      devs.forEach(d => { tp += d.total_prints; ts += d.successful; tf += d.failed; tt += d.total_time_s; tw += d.total_weight_g; });
+      const rate = tp > 0 ? Math.round(ts / tp * 100) : 0;
+      return stat('Prints', tp, 'orange')
+        + stat('Vellykket', ts, 'color:var(--bambu-green)')
+        + stat('Feilet', tf, 'color:var(--bambu-red)')
+        + stat('Suksessrate', rate + '%', 'color:var(--bambu-green)')
+        + stat('Printtid', formatDuration(tt))
+        + stat('Filament', formatWeight(tw));
+    }
+
+    function buildWarningHTML(data) {
+      if (data.data_complete === true) return '';
+      const apiTotal = data.api_total || 0;
+      return '<div class="bambu-stats-warning">'
+        + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>'
+        + ' Historikken lastes inn – tallene er ikke komplette ennå. Last inn siden på nytt om litt.'
+        + (apiTotal > 0 ? ' (Bambu rapporterer ' + apiTotal.toLocaleString('no') + ' tasks totalt)' : '')
+        + '</div>';
+    }
+
+    function buildFullUI(data) {
+      allDevs = data.devices || [];
+      exportBtnHtml = '<a class="bambu-sort-btn bambu-export-btn" href="' + REST + '/export" download>'
+        + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>'
+        + ' Last ned CSV</a>';
+      el.innerHTML = buildWarningHTML(data)
+        + '<div class="bambu-stats-summary">' + buildSummaryHTML(allDevs) + '</div>'
+        + '<div class="bambu-refresh-ind"></div>'
+        + renderTabs()
+        + '<div class="bambu-tab-body">' + buildStatsBody() + '</div>';
+      relink();
+      el.querySelectorAll('.bambu-tab-btn').forEach(btn => {
+        btn.addEventListener('click', () => { currentTab = btn.dataset.tab; switchTab(); });
+      });
+      bindSortBtns();
+    }
+
+    function updateInPlace(data) {
+      allDevs = data.devices || [];
+      const sum = el.querySelector('.bambu-stats-summary');
+      if (sum) sum.innerHTML = buildSummaryHTML(allDevs);
+      if (currentTab === 'stats') render();
+      const ind = el.querySelector('.bambu-refresh-ind');
+      if (ind) ind.classList.remove('bambu-refreshing');
+    }
+
+    async function load() {
+      let cached = null;
+      try { cached = JSON.parse(localStorage.getItem('bambu_stats_v1')); } catch (e) {}
+
+      if (cached) {
+        buildFullUI(cached);
+        const ind = el.querySelector('.bambu-refresh-ind');
+        if (ind) ind.classList.add('bambu-refreshing');
+        try {
+          const res  = await fetch(REST + '/stats');
+          const data = await res.json();
+          if (!data.error) {
+            try { localStorage.setItem('bambu_stats_v1', JSON.stringify(data)); } catch (e) {}
+            updateInPlace(data);
+          } else if (ind) { ind.classList.remove('bambu-refreshing'); }
+        } catch (e) { if (ind) ind.classList.remove('bambu-refreshing'); }
+      } else {
+        el.innerHTML = '<div class="bambu-loading">Laster statistikk...</div>';
         relink();
+        try {
+          const res  = await fetch(REST + '/stats');
+          const data = await res.json();
+          if (data.error) throw new Error(data.error);
+          try { localStorage.setItem('bambu_stats_v1', JSON.stringify(data)); } catch (e) {}
+          buildFullUI(data);
+        } catch (e) {
+          el.innerHTML = '<div class="bambu-loading">Kunne ikke laste statistikk.</div>';
+          relink();
+        }
       }
     }
     load();

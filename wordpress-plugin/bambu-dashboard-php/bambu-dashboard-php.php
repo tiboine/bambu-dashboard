@@ -3,7 +3,7 @@
  * Plugin Name: Bambu Lab 3D Print Dashboard (PHP)
  * Plugin URI: https://makerspaceringebu.no
  * Description: Sanntids 3D-print dashboard for Bambu Lab – ren PHP, ingen ekstern server nødvendig. Bruk [bambu_dashboard] og [bambu_stats].
- * Version: 1.1.5
+ * Version: 1.4.0
  * Author: Makerspace Ringebu
  * License: GPL v2 or later
  * Text Domain: bambu-dashboard-php
@@ -22,6 +22,9 @@ class BambuDashboardPHP {
     }
 
     private function __construct() {
+        add_action('plugins_loaded',     [$this, 'maybe_create_table']);
+        add_action('init',               [$this, 'schedule_cron']);
+        add_action('bambu_php_cron',     [$this, 'cron_sync']);
         add_action('admin_menu',         [$this, 'admin_menu']);
         add_action('rest_api_init',      [$this, 'register_rest_routes']);
         add_action('wp_enqueue_scripts', [$this, 'enqueue_assets']);
@@ -230,7 +233,6 @@ class BambuDashboardPHP {
     }
 
     private function fetch_stats() {
-        // Rask cache – unngår DB-kall mellom sideinnlastinger
         $quick = get_transient('bambu_php_stats');
         if ($quick !== false) return $quick;
 
@@ -238,100 +240,70 @@ class BambuDashboardPHP {
 
         $dev_info = $this->get_device_info();
 
-        // ── Ferske jobber (alltid hentet på nytt for å fange statusendringer) ──
-        $recent          = [];
-        $api_total       = 0;
-        $after           = null;
-        for ($i = 0; $i < 2; $i++) {   // 2 sider = 200 ferske jobber
+        $hist = get_option('bambu_php_hist_stats', [
+            'boundary'  => null,
+            'complete'  => false,
+            'api_total' => 0,
+        ]);
+
+        // Fetch recent tasks (always, to catch new prints)
+        $recent    = [];
+        $api_total = 0;
+        $after     = null;
+        for ($i = 0; $i < 2; $i++) {
             $page = $this->fetch_task_page($after);
             if (empty($page['hits'])) break;
-            if ($i === 0) $api_total = $page['total'];   // faktisk total fra Bambu
+            if ($i === 0) $api_total = $page['total'];
             $recent = array_merge($recent, $page['hits']);
             if (count($page['hits']) < 100) break;
             $after = end($page['hits'])['id'];
         }
-
-        $newest_recent_id = $recent[0]['id'] ?? null;
-        $boundary_id      = !empty($recent) ? end($recent)['id'] : null;
-
-        // ── Historisk cache (persistent, hentes kun én gang) ──
-        $hist = get_option('bambu_php_hist_stats', [
-            'stats'     => [],        // aggregerte tall per device
-            'boundary'  => null,      // siste task-ID i historikk (eldste vi har sett)
-            'complete'  => false,     // har vi hentet all historikk?
-            'newest'    => null,      // nyeste task-ID vi aggregerte inn i historikk
-            'api_total' => 0,         // faktisk total rapportert av Bambu API
-        ]);
-
-        // Oppdater api_total alltid hvis vi fikk et tall
         if ($api_total > 0) $hist['api_total'] = $api_total;
 
-        if (!$hist['complete'] && $boundary_id) {
-            // Hent historikk i biter – maks 20 sek per forespørsel for å unngå timeout.
-            // Sjekker også at side-ID endrer seg (stopper ved paginerings-loop).
-            $after    = $hist['boundary'] ?: $boundary_id;
-            $deadline = microtime(true) + 20;
-            $seen_ids = [];   // loop-deteksjon
+        foreach ($recent as $task) {
+            $this->insert_print($task, $dev_info);
+        }
+
+        // History fetch if not yet complete (INSERT IGNORE handles dedup)
+        if (!$hist['complete'] && !empty($recent)) {
+            $after      = $hist['boundary'] ?: end($recent)['id'];
+            $deadline   = microtime(true) + 20;
+            $seen_pages = [];
             while (microtime(true) < $deadline) {
-                $page      = $this->fetch_task_page($after);
-                $first_id  = $page['hits'][0]['id'] ?? null;
-                if (empty($page['hits']) || $first_id === null) {
-                    $hist['complete'] = true;
-                    break;
-                }
-                // Hvis vi ser samme første ID igjen betyr det at ?after= ikke fungerer
-                if (isset($seen_ids[$first_id])) {
-                    $hist['complete'] = true;   // ingen flere unike sider
-                    break;
-                }
-                $seen_ids[$first_id] = true;
+                $page     = $this->fetch_task_page($after);
+                $first_id = $page['hits'][0]['id'] ?? null;
+                if (empty($page['hits']) || $first_id === null) { $hist['complete'] = true; break; }
+                if (isset($seen_pages[$first_id]))               { $hist['complete'] = true; break; }
+                $seen_pages[$first_id] = true;
                 foreach ($page['hits'] as $task) {
-                    $this->merge_task($hist['stats'], $task, $dev_info);
+                    $this->insert_print($task, $dev_info);
                 }
                 $hist['boundary'] = end($page['hits'])['id'];
                 if (count($page['hits']) < 100) { $hist['complete'] = true; break; }
                 $after = $hist['boundary'];
             }
-            if (!isset($hist['newest'])) $hist['newest'] = $boundary_id;
-            update_option('bambu_php_hist_stats', $hist);
-        } elseif ($hist['complete'] && $boundary_id && $hist['newest'] !== $boundary_id) {
-            // Historikken er komplett men grensen har beveget seg (nye jobber siden sist)
-            $after = $boundary_id;
-            $stop  = $hist['newest'];
-            $done  = false;
-            for ($i = 0; $i < 5 && !$done; $i++) {
-                $page = $this->fetch_task_page($after);
-                if (empty($page['hits'])) break;
-                foreach ($page['hits'] as $task) {
-                    if ($task['id'] === $stop) { $done = true; break; }
-                    $this->merge_task($hist['stats'], $task, $dev_info);
-                }
-                if (count($page['hits']) < 100) break;
-                $after = end($page['hits'])['id'];
-            }
-            $hist['newest'] = $boundary_id;
-            update_option('bambu_php_hist_stats', $hist);
         }
 
-        // ── Kombiner historikk + ferske jobber ──
-        $stats = $hist['stats'];
-        foreach ($recent as $task) {
-            $this->merge_task($stats, $task, $dev_info);
-        }
+        update_option('bambu_php_hist_stats', $hist);
 
-        $total  = array_sum(array_column($stats, 'total_prints'));
+        global $wpdb;
+        $table    = $wpdb->prefix . 'bambu_prints';
+        $db_count = (int) $wpdb->get_var("SELECT COUNT(*) FROM `$table`");
+        $db_stats = $this->get_stats_from_db();
+        $total    = array_sum(array_column($db_stats, 'total_prints'));
+
         $result = [
-            'devices'        => array_values($stats),
-            'total_tasks'    => $total,
-            'api_total'      => $hist['api_total'],   // faktisk total fra Bambu (for å oppdage avkorting)
-            'data_complete'  => $hist['complete'],
-            'cache_info'     => [
+            'devices'       => array_values($db_stats),
+            'total_tasks'   => $total,
+            'api_total'     => $hist['api_total'],
+            'data_complete' => $hist['complete'],
+            'cache_info'    => [
                 'history_complete' => $hist['complete'],
                 'recent_fetched'   => count($recent),
+                'db_prints_count'  => $db_count,
             ],
         ];
 
-        // Hvis historikken ikke er ferdig lastet, la transient utløpe raskere så neste sideinnlasting fortsetter
         $ttl = $hist['complete'] ? 300 : 30;
         set_transient('bambu_php_stats', $result, $ttl);
         return $result;
@@ -389,6 +361,180 @@ class BambuDashboardPHP {
         return $info;
     }
 
+    // ── Cron + Pi-integrasjon ────────────────────────────────────────────────
+
+    public function schedule_cron() {
+        if (!wp_next_scheduled('bambu_php_cron')) {
+            wp_schedule_event(time(), 'hourly', 'bambu_php_cron');
+        }
+    }
+
+    public function cron_sync() {
+        delete_transient('bambu_php_stats');
+        $this->fetch_stats();
+    }
+
+    private function get_pi_key() {
+        $key = get_option('bambu_php_pi_key');
+        if (!$key) {
+            $key = bin2hex(random_bytes(20));
+            update_option('bambu_php_pi_key', $key);
+        }
+        return $key;
+    }
+
+    public function check_pi_key(WP_REST_Request $req) {
+        $key = $req->get_header('X-Bambu-Key');
+        return $key && hash_equals($this->get_pi_key(), $key);
+    }
+
+    /** POST /bambu/v1/push-print – Pi sender ferdig print til WordPress */
+    public function rest_push_print(WP_REST_Request $req) {
+        $task = $req->get_json_params();
+        if (empty($task['id'])) {
+            return new WP_Error('missing_id', 'task id påkrevd', ['status' => 400]);
+        }
+        $inserted = $this->insert_print($task, []);
+        if ($inserted) delete_transient('bambu_php_stats');
+        return rest_ensure_response(['inserted' => $inserted, 'task_id' => $task['id']]);
+    }
+
+    /** GET /bambu/v1/cron-sync?key=… – For ekte cron-jobb (cPanel/Linux) */
+    public function rest_cron_sync(WP_REST_Request $req) {
+        $key = sanitize_text_field($req->get_param('key') ?? '');
+        if (!$key || !hash_equals($this->get_pi_key(), $key)) {
+            return new WP_Error('unauthorized', 'Ugyldig nøkkel', ['status' => 401]);
+        }
+        delete_transient('bambu_php_stats');
+        $result = $this->fetch_stats();
+        if (is_wp_error($result)) {
+            return rest_ensure_response(['ok' => false, 'error' => $result->get_error_message()]);
+        }
+        return rest_ensure_response([
+            'ok'        => true,
+            'db_prints' => $result['cache_info']['db_prints_count'] ?? 0,
+            'api_total' => $result['api_total'] ?? 0,
+            'complete'  => $result['data_complete'] ?? false,
+        ]);
+    }
+
+    // ── Database ─────────────────────────────────────────────────────────────
+
+    public function maybe_create_table() {
+        global $wpdb;
+        $table = $wpdb->prefix . 'bambu_prints';
+        if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table)) !== $table) {
+            $this->create_table();
+        }
+    }
+
+    private function create_table() {
+        global $wpdb;
+        $table   = $wpdb->prefix . 'bambu_prints';
+        $charset = $wpdb->get_charset_collate();
+        $sql = "CREATE TABLE $table (
+            id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            task_id      VARCHAR(64)     NOT NULL,
+            device_id    VARCHAR(64)     NOT NULL DEFAULT '',
+            device_name  VARCHAR(128)    NOT NULL DEFAULT '',
+            device_model VARCHAR(128)    NOT NULL DEFAULT '',
+            title        VARCHAR(255)    NOT NULL DEFAULT '',
+            status       TINYINT         NOT NULL DEFAULT 0,
+            start_time   DATETIME        NULL,
+            end_time     DATETIME        NULL,
+            weight_g     FLOAT           NOT NULL DEFAULT 0,
+            length_cm    FLOAT           NOT NULL DEFAULT 0,
+            cost_time_s  INT UNSIGNED    NOT NULL DEFAULT 0,
+            PRIMARY KEY  (id),
+            UNIQUE KEY   task_id (task_id),
+            KEY          device_id (device_id),
+            KEY          start_time (start_time)
+        ) $charset;";
+        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+        dbDelta($sql);
+    }
+
+    /** Inserts one task row with INSERT IGNORE – returns true if newly inserted */
+    private function insert_print(array $task, array $dev_info) {
+        global $wpdb;
+        $table = $wpdb->prefix . 'bambu_prints';
+        $tid   = $task['id'] ?? null;
+        if (!$tid) return false;
+
+        $did   = $task['deviceId'] ?? 'unknown';
+        $to_dt = function($v) {
+            if (!$v) return null;
+            $ts = (is_numeric($v) && abs($v) > 1e10) ? intdiv((int)$v, 1000) : strtotime((string)$v);
+            return ($ts && $ts > 0) ? gmdate('Y-m-d H:i:s', $ts) : null;
+        };
+        $start_dt = $to_dt($task['startTime'] ?? null);
+        $end_dt   = $to_dt($task['endTime']   ?? null);
+        $s_ph     = $start_dt ? '%s' : 'NULL';
+        $e_ph     = $end_dt   ? '%s' : 'NULL';
+
+        $args = [
+            $tid,
+            $did,
+            substr($task['deviceName']  ?? ($dev_info[$did]['name']  ?? $did), 0, 127),
+            substr($task['deviceModel'] ?? ($dev_info[$did]['model'] ?? 'Ukjent'), 0, 127),
+            substr($task['title']       ?? '', 0, 254),
+            (int)($task['status'] ?? 0),
+        ];
+        if ($start_dt) $args[] = $start_dt;
+        if ($end_dt)   $args[] = $end_dt;
+        array_push($args,
+            (float)($task['weight']   ?? 0),
+            (float)($task['length']   ?? 0),
+            (int)($task['costTime']   ?? 0)
+        );
+
+        return $wpdb->query(
+            $wpdb->prepare(
+                "INSERT IGNORE INTO `$table`
+                    (task_id, device_id, device_name, device_model, title, status,
+                     start_time, end_time, weight_g, length_cm, cost_time_s)
+                 VALUES (%s, %s, %s, %s, %s, %d, $s_ph, $e_ph, %f, %f, %d)",
+                ...$args
+            )
+        ) === 1;
+    }
+
+    /** Returns per-device aggregated stats from the DB table */
+    private function get_stats_from_db() {
+        global $wpdb;
+        $table = $wpdb->prefix . 'bambu_prints';
+        $rows  = $wpdb->get_results(
+            "SELECT device_id,
+                    MAX(device_name)  AS name,
+                    MAX(device_model) AS model,
+                    COUNT(*)          AS total_prints,
+                    SUM(status = 2)   AS successful,
+                    SUM(status != 2)  AS failed,
+                    SUM(CASE WHEN start_time IS NOT NULL AND end_time IS NOT NULL
+                             THEN TIMESTAMPDIFF(SECOND, start_time, end_time)
+                             ELSE cost_time_s END)              AS total_time_s,
+                    SUM(CASE WHEN status = 2 THEN weight_g  ELSE 0 END) AS total_weight_g,
+                    SUM(CASE WHEN status = 2 THEN length_cm ELSE 0 END) AS total_length_cm
+             FROM `$table`
+             GROUP BY device_id",
+            ARRAY_A
+        );
+        $stats = [];
+        foreach ($rows as $r) {
+            $stats[$r['device_id']] = [
+                'name'            => $r['name'],
+                'model'           => $r['model'],
+                'total_prints'    => (int)$r['total_prints'],
+                'successful'      => (int)$r['successful'],
+                'failed'          => (int)$r['failed'],
+                'total_time_s'    => (float)$r['total_time_s'],
+                'total_weight_g'  => (float)$r['total_weight_g'],
+                'total_length_cm' => (float)$r['total_length_cm'],
+            ];
+        }
+        return $stats;
+    }
+
     // ── WP REST API ──────────────────────────────────────────────────────────
 
     public function register_rest_routes() {
@@ -398,10 +544,13 @@ class BambuDashboardPHP {
         register_rest_route('bambu/v1', '/status',     array_merge(['methods' => 'GET', 'callback' => [$this, 'rest_status']],    $public));
         register_rest_route('bambu/v1', '/today',      array_merge(['methods' => 'GET', 'callback' => [$this, 'rest_today']],     $public));
         register_rest_route('bambu/v1', '/stats',      array_merge(['methods' => 'GET', 'callback' => [$this, 'rest_stats']],     $public));
+        register_rest_route('bambu/v1', '/prints',     array_merge(['methods' => 'GET', 'callback' => [$this, 'rest_prints']],    $public));
         register_rest_route('bambu/v1', '/export',     array_merge(['methods' => 'GET', 'callback' => [$this, 'rest_export']],    $public));
         register_rest_route('bambu/v1', '/raw-sample', array_merge(['methods' => 'GET', 'callback' => [$this, 'rest_raw_sample']],$public));
         register_rest_route('bambu/v1', '/recent',     array_merge(['methods' => 'GET', 'callback' => [$this, 'rest_recent']],    $public));
         register_rest_route('bambu/v1', '/oldest',     array_merge(['methods' => 'GET', 'callback' => [$this, 'rest_oldest']],    $public));
+        register_rest_route('bambu/v1', '/push-print', ['methods' => 'POST','callback' => [$this, 'rest_push_print'], 'permission_callback' => [$this, 'check_pi_key']]);
+        register_rest_route('bambu/v1', '/cron-sync', ['methods' => 'GET', 'callback' => [$this, 'rest_cron_sync'],  'permission_callback' => '__return_true']);
         register_rest_route('bambu/v1', '/verify',     array_merge(['methods' => 'POST','callback' => [$this, 'rest_verify']],    $admin));
     }
 
@@ -431,6 +580,64 @@ class BambuDashboardPHP {
         $stats = $this->fetch_stats();
         if (is_wp_error($stats)) return rest_ensure_response(['error' => $stats->get_error_message()]);
         return rest_ensure_response($stats);
+    }
+
+    /** Paginated list of individual prints from DB – ?page=1&per_page=20&device=<id> */
+    public function rest_prints(WP_REST_Request $req) {
+        global $wpdb;
+        $table    = $wpdb->prefix . 'bambu_prints';
+        $page     = max(1, (int)($req->get_param('page')     ?? 1));
+        $per_page = min(100, max(1, (int)($req->get_param('per_page') ?? 20)));
+        $device   = sanitize_text_field($req->get_param('device') ?? '');
+        $offset   = ($page - 1) * $per_page;
+
+        if ($device) {
+            $total = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM `$table` WHERE device_id = %s", $device));
+            $rows  = $wpdb->get_results(
+                $wpdb->prepare(
+                    "SELECT task_id, device_id, device_name, device_model, title, status,
+                            start_time, end_time, weight_g, length_cm, cost_time_s
+                     FROM `$table` WHERE device_id = %s ORDER BY start_time DESC LIMIT %d OFFSET %d",
+                    $device, $per_page, $offset
+                ),
+                ARRAY_A
+            );
+        } else {
+            $total = (int) $wpdb->get_var("SELECT COUNT(*) FROM `$table`");
+            $rows  = $wpdb->get_results(
+                $wpdb->prepare(
+                    "SELECT task_id, device_id, device_name, device_model, title, status,
+                            start_time, end_time, weight_g, length_cm, cost_time_s
+                     FROM `$table` ORDER BY start_time DESC LIMIT %d OFFSET %d",
+                    $per_page, $offset
+                ),
+                ARRAY_A
+            );
+        }
+
+        $prints = array_map(function($r) {
+            return [
+                'task_id'      => $r['task_id'],
+                'device_id'    => $r['device_id'],
+                'device_name'  => $r['device_name'],
+                'device_model' => $r['device_model'],
+                'title'        => $r['title'],
+                'status'       => (int)$r['status'],
+                'start_time'   => $r['start_time'],
+                'end_time'     => $r['end_time'],
+                'weight_g'     => (float)$r['weight_g'],
+                'length_cm'    => (float)$r['length_cm'],
+                'cost_time_s'  => (int)$r['cost_time_s'],
+            ];
+        }, $rows);
+
+        return rest_ensure_response([
+            'total'    => $total,
+            'page'     => $page,
+            'per_page' => $per_page,
+            'pages'    => $total > 0 ? (int)ceil($total / $per_page) : 0,
+            'prints'   => $prints,
+        ]);
     }
 
     /** CSV-eksport av aggregert statistikk per printer */
@@ -642,13 +849,21 @@ class BambuDashboardPHP {
                 echo '<div class="notice notice-success"><p>✅ Cache nullstilt. Akkumulert historikk er bevart – nye tasks hentes på nytt.</p></div>';
             }
 
+            if (isset($_POST['bambu_regen_key'])) {
+                delete_option('bambu_php_pi_key');
+                $this->get_pi_key(); // genererer ny
+                echo '<div class="notice notice-success"><p>✅ Ny API-nøkkel generert. Oppdater .env på Pi-en.</p></div>';
+            }
+
             if (isset($_POST['bambu_wipe_history'])) {
-                // Hard reset: slett ALT inkl. akkumulert historikk (kun ved korrupt data)
+                // Hard reset: slett ALT inkl. akkumulert historikk og DB-tabellen
                 delete_transient('bambu_php_stats');
                 delete_transient('bambu_php_today');
                 delete_transient('bambu_php_status');
                 delete_option('bambu_php_hist_stats');
-                echo '<div class="notice notice-warning"><p>⚠️ All statistikk-historikk slettet. Data hentes på nytt fra Bambu (kun tasks Bambu har lagret er tilgjengelig).</p></div>';
+                global $wpdb;
+                $wpdb->query("TRUNCATE TABLE `{$wpdb->prefix}bambu_prints`");
+                echo '<div class="notice notice-warning"><p>⚠️ All statistikk-historikk slettet (inkl. DB-tabellen). Data hentes på nytt fra Bambu (kun tasks Bambu har lagret er tilgjengelig).</p></div>';
             }
         }
 
@@ -737,11 +952,9 @@ class BambuDashboardPHP {
             <hr>
             <h2>Statistikk-cache</h2>
             <?php
+            global $wpdb;
+            $cached_tasks = (int) $wpdb->get_var("SELECT COUNT(*) FROM `{$wpdb->prefix}bambu_prints`");
             $hist = get_option('bambu_php_hist_stats', null);
-            $cached_tasks = 0;
-            if ($hist) {
-                foreach ($hist['stats'] ?? [] as $d) $cached_tasks += $d['total_prints'] ?? 0;
-            }
             ?>
             <p>
                 Lagrede historiske prints: <strong><?= number_format($cached_tasks) ?></strong>
@@ -764,6 +977,41 @@ class BambuDashboardPHP {
                 <input type="hidden" name="bambu_wipe_history" value="1" />
                 <?php submit_button('⚠ Hard reset (slett alt)', 'delete', 'submit', false); ?>
             </form>
+
+            <hr>
+            <h2>Pi-integrasjon</h2>
+            <?php $pi_key = $this->get_pi_key(); ?>
+            <p>Raspberry Pi-appen bruker API-nøkkelen for å sende print-data direkte til WordPress. Cron-URL-en kan legges inn i cPanel for automatisk synkronisering selv uten sidebesøk.</p>
+            <table class="form-table">
+                <tr>
+                    <th scope="row">API-nøkkel (Pi → WP)</th>
+                    <td>
+                        <code style="word-break:break-all"><?= esc_html($pi_key) ?></code>
+                        <form method="post" style="display:inline;margin-left:1rem">
+                            <?php wp_nonce_field('bambu_php_settings'); ?>
+                            <input type="hidden" name="bambu_regen_key" value="1" />
+                            <?php submit_button('Generer ny nøkkel', 'secondary small', 'submit', false,
+                                ['onclick' => 'return confirm("Generer ny nøkkel? Pi-appen må oppdateres med den nye.")'
+                            ]); ?>
+                        </form>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">Push-endepunkt</th>
+                    <td><code><?= esc_html(rest_url('bambu/v1/push-print')) ?></code><br>
+                    <span style="color:#666;font-size:0.9em">POST med header <code>X-Bambu-Key: &lt;nøkkel&gt;</code> og task-data som JSON</span></td>
+                </tr>
+                <tr>
+                    <th scope="row">Cron-URL (automatisk sync)</th>
+                    <td>
+                        <code style="word-break:break-all"><?= esc_html(rest_url('bambu/v1/cron-sync') . '?key=' . $pi_key) ?></code>
+                        <p class="description" style="margin-top:0.5rem">
+                            Legg inn i cPanel → Cron Jobs (f.eks. hvert 30. minutt):<br>
+                            <code>curl -s "<?= esc_html(rest_url('bambu/v1/cron-sync') . '?key=' . $pi_key) ?>" > /dev/null</code>
+                        </p>
+                    </td>
+                </tr>
+            </table>
 
             <hr>
             <h2>Bruk</h2>

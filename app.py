@@ -16,6 +16,9 @@ app = Flask(__name__)
 TOKEN_FILE  = Path(__file__).parent / ".token.json"
 STATS_FILE  = Path(__file__).parent / "stats_store.json"
 
+WP_URL     = os.getenv("WP_URL", "").rstrip("/")
+WP_API_KEY = os.getenv("WP_API_KEY", "")
+
 # ── Lokal stats-lagring ──────────────────────────────────────────
 # Full task-liste lagres lokalt. Bambu API brukes kun for å fylle hull.
 # Schema: {
@@ -75,6 +78,25 @@ def merge_task_into_store(store, task):
         "cover":     task.get("cover", ""),
     }
 
+def push_to_wordpress(task):
+    """Push ett task til WordPress i bakgrunn. Feiler stille."""
+    if not WP_URL or not WP_API_KEY:
+        return
+    def _push():
+        try:
+            resp = requests.post(
+                f"{WP_URL}/wp-json/bambu/v1/push-print",
+                json=task,
+                headers={"X-Bambu-Key": WP_API_KEY, "Content-Type": "application/json"},
+                timeout=10,
+            )
+            if resp.ok and resp.json().get("inserted"):
+                print(f"[WP] Push OK: {task.get('id')}")
+        except Exception as e:
+            print(f"[WP] Push feilet (ignorerer): {e}")
+    threading.Thread(target=_push, daemon=True).start()
+
+
 def fetch_task_page_raw(after=None):
     """Henter én side med tasks direkte fra Bambu API."""
     params = {"limit": 100}
@@ -119,8 +141,12 @@ def sync_stats_store():
             save_stats_store(store)
             return
 
+        existing_ids = set(store["tasks"].keys())
         for task in recent:
+            tid = task.get("id")
             merge_task_into_store(store, task)
+            if tid and str(tid) not in existing_ids:
+                push_to_wordpress(task)
         boundary_id = recent[-1].get("id")
 
         # Historikk: fyll bakover til komplett, med loop-deteksjon og tidsbudsjett
@@ -142,7 +168,11 @@ def sync_stats_store():
                     break
                 seen.add(first_id)
                 for task in hits:
+                    tid = task.get("id")
+                    is_new = tid and str(tid) not in store["tasks"]
                     merge_task_into_store(store, task)
+                    if is_new:
+                        push_to_wordpress(task)
                 store["sync"]["boundary"] = hits[-1].get("id")
                 if len(hits) < 100:
                     store["sync"]["complete"] = True
@@ -420,6 +450,7 @@ def on_message(client, userdata, msg):
     # Nullstill job_started_at når jobben er ferdig/avbrutt
     elif new_state in ("IDLE", "FAILED", "FINISH") and prev_state in ("RUNNING", "PREPARE", "PAUSE"):
         state["mqtt_status"][dev_id]["job_started_at"] = None
+        threading.Thread(target=sync_stats_store, daemon=True).start()
 
     # Oppdater online-status
     if dev_id in state["devices"]:

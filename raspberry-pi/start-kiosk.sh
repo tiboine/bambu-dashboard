@@ -1,11 +1,13 @@
 #!/bin/bash
 # ─────────────────────────────────────────────────────────────────
 #  Bambu Lab Dashboard – Kiosk-launcher for Raspberry Pi
-#  Åpner Chromium i fullskjerm-kiosk-modus når Flask er klar
+#  Sjekker git-oppdateringer, starter/restarter Flask, åpner Chromium
 # ─────────────────────────────────────────────────────────────────
 
 URL="http://localhost:5000"
 MAX_WAIT=180   # sekunder å vente på Flask (nettverksforbindelse kan ta tid)
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+APP_PY="$REPO_DIR/app.py"
 
 # ── Deaktiver skjermsparer og strømstyring ────────────────────────
 export DISPLAY="${DISPLAY:-:0}"
@@ -15,6 +17,36 @@ xset -dpms          2>/dev/null || true
 
 # ── Skjul musepeker ───────────────────────────────────────────────
 unclutter -idle 0.5 -root &
+
+# ── Git-oppdatering ───────────────────────────────────────────────
+echo "Sjekker git-oppdateringer i $REPO_DIR..."
+cd "$REPO_DIR"
+git fetch origin 2>/dev/null
+LOCAL=$(git rev-parse HEAD 2>/dev/null)
+REMOTE=$(git rev-parse origin/master 2>/dev/null || git rev-parse origin/main 2>/dev/null)
+
+if [ -n "$REMOTE" ] && [ "$LOCAL" != "$REMOTE" ]; then
+    echo "Ny versjon funnet – puller oppdateringer..."
+    git pull --ff-only origin "$(git rev-parse --abbrev-ref HEAD)" 2>/dev/null && \
+        echo "Oppdatering fullført (${LOCAL:0:7} → ${REMOTE:0:7})" || \
+        echo "Pull feilet – fortsetter med eksisterende versjon"
+else
+    echo "Ingen oppdateringer (${LOCAL:0:7})"
+fi
+
+# ── Start/restart Flask ───────────────────────────────────────────
+# Drep eventuell kjørende Flask-instans
+FLASK_PID=$(pgrep -f "python.*app.py" 2>/dev/null)
+if [ -n "$FLASK_PID" ]; then
+    echo "Stopper Flask (PID $FLASK_PID)..."
+    kill "$FLASK_PID" 2>/dev/null
+    sleep 2
+fi
+
+echo "Starter Flask..."
+cd "$REPO_DIR"
+nohup python3 app.py > /tmp/bambu-flask.log 2>&1 &
+echo "Flask PID: $!"
 
 # ── Vent til Flask svarer ─────────────────────────────────────────
 echo "Venter på Flask ($URL)..."
@@ -57,8 +89,7 @@ exec "$CHROMIUM" \
     --autoplay-policy=no-user-gesture-required \
     --check-for-update-interval=31536000 \
     --start-fullscreen \
-    --disable-gpu \
-    --disable-software-rasterizer \
+    --force-device-scale-factor=1 \
     --disable-dev-shm-usage \
     --no-sandbox \
     2>/dev/null \

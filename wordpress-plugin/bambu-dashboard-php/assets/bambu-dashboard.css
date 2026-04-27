@@ -518,3 +518,116 @@
   color: #ffffff;
   text-decoration: none;
 }
+
+/* ── Bakgrunnsoppdatering-indikator ──────────────────────────────────────── */
+.bambu-refresh-ind {
+  height: 3px;
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: clamp(0.5rem, 0.8vw, 1rem);
+}
+.bambu-refresh-ind.bambu-refreshing::after {
+  content: '';
+  display: block;
+  height: 100%;
+  width: 35%;
+  background: var(--bambu-orange);
+  border-radius: 2px;
+  animation: bambu-slide 1.4s ease-in-out infinite;
+}
+@keyframes bambu-slide {
+  0%   { transform: translateX(-200%); }
+  100% { transform: translateX(450%); }
+}
+
+/* ── Faner ───────────────────────────────────────────────────────────────── */
+.bambu-tabs {
+  display: flex;
+  gap: clamp(0.3rem, 0.5vw, 0.6rem);
+  margin-bottom: clamp(0.75rem, 1.2vw, 1.5rem);
+}
+
+.bambu-tab-btn {
+  font-family: 'Jura', sans-serif;
+  font-size: clamp(0.7rem, 1vw, 1.1rem);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: clamp(0.35rem, 0.5vw, 0.7rem) clamp(0.9rem, 1.4vw, 1.8rem);
+  border-radius: 8px;
+  border: 1px solid var(--bambu-mid);
+  background: var(--bambu-card-bg);
+  color: var(--bambu-text-muted);
+  cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+}
+
+.bambu-tab-btn:hover   { border-color: var(--bambu-orange); color: var(--bambu-orange); }
+.bambu-tab-btn.active  { background: var(--bambu-orange); border-color: var(--bambu-orange); color: #ffffff; }
+
+/* ── Historikk-tabell ────────────────────────────────────────────────────── */
+.bambu-hist-table-wrap {
+  overflow-x: auto;
+  border-radius: 10px;
+  box-shadow: 0 1px 4px var(--bambu-shadow);
+}
+
+.bambu-hist-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--bambu-card-bg);
+  font-size: clamp(1.0rem, 1.5vw, 1.5rem);
+  transition: background .3s;
+}
+
+.bambu-hist-table thead th {
+  padding: clamp(0.5rem, 0.8vw, 1rem) clamp(0.8rem, 1.1vw, 1.5rem);
+  text-align: left;
+  font-size: clamp(0.75rem, 1.1vw, 1.3rem);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--bambu-text-muted);
+  border-bottom: 2px solid var(--bambu-mid);
+  white-space: nowrap;
+}
+
+.bambu-hist-table tbody tr {
+  border-bottom: 1px solid var(--bambu-mid);
+  transition: background .1s;
+}
+.bambu-hist-table tbody tr:last-child { border-bottom: none; }
+.bambu-hist-table tbody tr:hover      { background: rgba(233,100,0,.06); }
+
+.bambu-hist-table tbody td {
+  padding: clamp(0.45rem, 0.7vw, 0.9rem) clamp(0.8rem, 1.1vw, 1.5rem);
+  vertical-align: middle;
+}
+
+.bambu-hist-fail td { opacity: 0.55; }
+
+.bambu-hist-date    { white-space: nowrap; color: var(--bambu-text-muted); font-size: clamp(0.9rem, 1.3vw, 1.35rem); }
+.bambu-hist-printer { font-weight: 700; white-space: nowrap; }
+.bambu-hist-title   { max-width: clamp(140px, 20vw, 320px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--bambu-text-muted); }
+.bambu-hist-meta    { white-space: nowrap; }
+
+.bambu-hist-pager {
+  display: flex;
+  align-items: center;
+  gap: clamp(0.5rem, 0.8vw, 1rem);
+  margin-top: clamp(0.75rem, 1.2vw, 1.5rem);
+  flex-wrap: wrap;
+}
+
+.bambu-hist-pager .bambu-sort-btn:disabled { opacity: 0.35; cursor: not-allowed; pointer-events: none; }
+
+.bambu-hist-pagenum {
+  font-size: clamp(1.0rem, 1.4vw, 1.4rem);
+  color: var(--bambu-text-muted);
+}
+
+.bambu-hist-total {
+  font-size: clamp(0.9rem, 1.3vw, 1.3rem);
+  color: var(--bambu-text-faint);
+  margin-top: clamp(0.4rem, 0.6vw, 0.8rem);
+}
