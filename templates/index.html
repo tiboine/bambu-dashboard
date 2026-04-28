@@ -736,8 +736,7 @@
     );
   }
 
-  function renderCard(p) {
-    const badge = statusLabel(p);
+  function buildBodyHtml(p) {
     const cls = cardClass(p);
     const isPrinting = cls === 'printing';
     const isFailed = cls === 'failed';
@@ -748,23 +747,7 @@
     const timeStr = formatTime(p.time_remaining);
     const finishStr = estimatedFinish(p.time_remaining);
 
-    // Bakgrunns-progress med zebra (hastighet basert på spd_lvl)
-    const zebraSpeeds = { 1: '3s', 2: '1.5s', 3: '1.2s', 4: '0.9s' };
-    const zebraSpeed = zebraSpeeds[p.spd_lvl] || '1.5s';
-    let progressBg = '';
-    if (hasJob && progress != null) {
-      progressBg = `<div class="card-progress-bg" style="width: ${progress}%; animation-duration: ${zebraSpeed}"></div>`;
-    } else if (isJustDone) {
-      progressBg = `<div class="card-progress-bg"></div>`;
-    }
-
-    let thumbHtml = '';
-    if (p.thumbnail) {
-      thumbHtml = `<div class="thumb-wrap"><img src="${p.thumbnail}" alt="Forhandsvisning" /></div>`;
-    }
-
     let bodyHtml = '';
-
     if (isFailed) {
       bodyHtml += `<div class="idle-msg" style="color: var(--red); font-style: normal; font-weight: 600;">Printing feilet!</div>`;
     } else if (isPaused) {
@@ -791,8 +774,33 @@
     } else if (!hasJob) {
       bodyHtml += `<div class="idle-msg">Ingen aktiv jobb.</div>`;
     }
+    return bodyHtml;
+  }
 
-    const infoHtml = '';
+  function renderCard(p) {
+    const badge = statusLabel(p);
+    const cls = cardClass(p);
+    const isPrinting = cls === 'printing';
+    const isFailed = cls === 'failed';
+    const isPaused = cls === 'paused';
+    const isJustDone = cls === 'just-done';
+    const hasJob = isPrinting || isFailed || isPaused;
+    const progress = p.progress != null ? parseFloat(p.progress) : null;
+
+    const zebraSpeeds = { 1: '3s', 2: '1.5s', 3: '1.2s', 4: '0.9s' };
+    const zebraSpeed = zebraSpeeds[p.spd_lvl] || '1.5s';
+    let progressBg = '';
+    if (hasJob && progress != null) {
+      progressBg = `<div class="card-progress-bg" style="width: ${progress}%; animation-duration: ${zebraSpeed}"></div>`;
+    } else if (isJustDone) {
+      progressBg = `<div class="card-progress-bg"></div>`;
+    }
+
+    const thumbHtml = p.thumbnail
+      ? `<div class="thumb-wrap"><img src="${p.thumbnail}" alt="Forhandsvisning" /></div>`
+      : '';
+
+    const bodyHtml = buildBodyHtml(p);
 
     return `
       <div class="card ${cls}" data-dev="${p.id}">
@@ -804,38 +812,123 @@
           <span class="badge ${badge.cls}">${badge.text}</span>
         </div>
         ${thumbHtml}
-        <div class="card-body">${bodyHtml}${infoHtml}</div>
+        <div class="card-body">${bodyHtml}</div>
       </div>`;
   }
 
-  // Render som bevarer .card-progress-bg-elementet på tvers av refresh,
-  // slik at CSS-transitionen på width faktisk trigges (ellers blir hvert
-  // refresh et nytt DOM-element og transitionen gjør ingenting).
+  // Oppdaterer et eksisterende kort i-place: bytter kun felter som faktisk
+  // har endret seg, og gjenbruker <img>-elementet for thumbnail. Dette
+  // unngår at kortene blir blanke/flicker mellom refresher.
+  function updateCardInPlace(card, p) {
+    const badge = statusLabel(p);
+    const cls = cardClass(p);
+    const isPrinting = cls === 'printing';
+    const isFailed = cls === 'failed';
+    const isPaused = cls === 'paused';
+    const isJustDone = cls === 'just-done';
+    const hasJob = isPrinting || isFailed || isPaused;
+    const progress = p.progress != null ? parseFloat(p.progress) : null;
+
+    const wantClass = `card ${cls}`;
+    if (card.className !== wantClass) card.className = wantClass;
+
+    const nameEl = card.querySelector('.card-name');
+    if (nameEl && nameEl.textContent !== p.name) nameEl.textContent = p.name;
+
+    const badgeEl = card.querySelector('.badge');
+    if (badgeEl) {
+      const bcls = `badge ${badge.cls}`;
+      if (badgeEl.className !== bcls) badgeEl.className = bcls;
+      if (badgeEl.textContent !== badge.text) badgeEl.textContent = badge.text;
+    }
+
+    // Progress-bakgrunn — bevar elementet for at CSS-transition skal trigges.
+    const zebraSpeeds = { 1: '3s', 2: '1.5s', 3: '1.2s', 4: '0.9s' };
+    const zebraSpeed = zebraSpeeds[p.spd_lvl] || '1.5s';
+    let bg = card.querySelector('.card-progress-bg');
+    if (hasJob && progress != null) {
+      if (!bg) {
+        bg = document.createElement('div');
+        bg.className = 'card-progress-bg';
+        bg.style.width = '0%';
+        bg.style.animationDuration = zebraSpeed;
+        card.insertBefore(bg, card.firstChild);
+        requestAnimationFrame(() => { bg.style.width = `${progress}%`; });
+      } else {
+        if (bg.style.animationDuration !== zebraSpeed) bg.style.animationDuration = zebraSpeed;
+        const wantWidth = `${progress}%`;
+        if (bg.style.width !== wantWidth) bg.style.width = wantWidth;
+      }
+    } else if (isJustDone) {
+      if (!bg) {
+        bg = document.createElement('div');
+        bg.className = 'card-progress-bg';
+        card.insertBefore(bg, card.firstChild);
+      } else {
+        if (bg.style.width) bg.style.width = '';
+        if (bg.style.animationDuration) bg.style.animationDuration = '';
+      }
+    } else if (bg) {
+      bg.remove();
+    }
+
+    // Thumbnail — gjenbruk <img> så bildet ikke re-lastes (ingen hvit flash).
+    const wrap = card.querySelector('.thumb-wrap');
+    if (p.thumbnail) {
+      if (wrap) {
+        const img = wrap.querySelector('img');
+        if (img && img.getAttribute('src') !== p.thumbnail) img.setAttribute('src', p.thumbnail);
+      } else {
+        const newWrap = document.createElement('div');
+        newWrap.className = 'thumb-wrap';
+        const img = document.createElement('img');
+        img.setAttribute('src', p.thumbnail);
+        img.alt = 'Forhandsvisning';
+        newWrap.appendChild(img);
+        const header = card.querySelector('.card-header');
+        header.insertAdjacentElement('afterend', newWrap);
+      }
+    } else if (wrap) {
+      wrap.remove();
+    }
+
+    const body = card.querySelector('.card-body');
+    if (body) {
+      const newBodyHtml = buildBodyHtml(p);
+      if (body.dataset.sig !== newBodyHtml) {
+        body.innerHTML = newBodyHtml;
+        body.dataset.sig = newBodyHtml;
+      }
+    }
+  }
+
   function applyCards(grid, printers) {
     const existing = new Map();
-    grid.querySelectorAll('.card[data-dev]').forEach(c => existing.set(c.dataset.dev, c));
+    grid.querySelectorAll(':scope > .card[data-dev]').forEach(c => existing.set(c.dataset.dev, c));
+    const seen = new Set();
+    const ordered = [];
 
-    const tmp = document.createElement('div');
-    tmp.innerHTML = printers.map(renderCard).join('');
-    const newCards = Array.from(tmp.children);
-
-    newCards.forEach(newEl => {
-      const old = existing.get(newEl.dataset.dev);
-      if (!old) return;
-      const oldBg = old.querySelector('.card-progress-bg');
-      const newBg = newEl.querySelector('.card-progress-bg');
-      if (!oldBg || !newBg) return;
-      // Flytt gammel bg inn i nytt kort, og animer til ny bredde på neste frame
-      const targetWidth   = newBg.style.width;
-      const targetAnimDur = newBg.style.animationDuration;
-      const targetCls     = newBg.className;
-      newBg.replaceWith(oldBg);
-      oldBg.className = targetCls;
-      oldBg.style.animationDuration = targetAnimDur;
-      requestAnimationFrame(() => { oldBg.style.width = targetWidth; });
+    printers.forEach(p => {
+      seen.add(p.id);
+      let card = existing.get(p.id);
+      if (card) {
+        updateCardInPlace(card, p);
+      } else {
+        const tmp = document.createElement('div');
+        tmp.innerHTML = renderCard(p);
+        card = tmp.firstElementChild;
+        const body = card.querySelector('.card-body');
+        if (body) body.dataset.sig = buildBodyHtml(p);
+      }
+      ordered.push(card);
     });
 
-    grid.replaceChildren(...newCards);
+    existing.forEach((c, id) => { if (!seen.has(id)) c.remove(); });
+
+    // Slipp inn nye kort og reorder uten å berøre uendrede.
+    ordered.forEach((card, i) => {
+      if (grid.children[i] !== card) grid.insertBefore(card, grid.children[i] || null);
+    });
   }
 
   function renderSummary(printers) {
