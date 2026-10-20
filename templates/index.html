@@ -23,8 +23,9 @@
     }
 
     /* Tilpass-til-skjerm (kiosk): alt skal synes uten scrolling */
+    html:has(body.fit) { overflow: hidden; }
     body.fit { height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
-    body.fit main { flex: 1; min-height: 0; padding: 0.75rem; display: flex; flex-direction: column; }
+    body.fit main { flex: 1; min-height: 0; padding: 0.75rem; display: flex; flex-direction: column; overflow: hidden; }
     body.fit .grid {
       flex: 1;
       min-height: 0;
@@ -782,7 +783,7 @@
           return el;
         }));
       }
-      setHidden(bar, false);
+      if (bar.hidden) { setHidden(bar, false); layoutFit(); }
     } catch (e) {}
   }
 
@@ -807,7 +808,7 @@
     }
     if (!best) return;
     grid.style.setProperty('--card-w', Math.floor(best.w) + 'px');
-    grid.style.setProperty('--card-h', Math.floor(best.h) + 'px');
+    grid.style.setProperty('--card-h', Math.floor(best.h) - 1 + 'px');  // -1: aldri overflyt pga. avrunding
   }
 
   function setFit(on) {
@@ -820,6 +821,14 @@
   $('#fit-btn').addEventListener('click', () => { setFit(!fit); lsSet('autoMode', fit ? '1' : '0'); });
   let resizeTimer;
   window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(layoutFit, 120); });
+  // Alt som endrer plassen til kortene (banner, I dag-stripen, fullskjerm) gir ny utregning
+  if (window.ResizeObserver) {
+    let lastH = 0;
+    new ResizeObserver(() => {
+      const h = grid.clientHeight;
+      if (fit && Math.abs(h - lastH) > 1) { lastH = h; layoutFit(); }
+    }).observe(grid);
+  }
 
   // ── Tema / fullskjerm ──
   $('#theme-btn').addEventListener('click', () => {

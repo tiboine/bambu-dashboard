@@ -74,6 +74,7 @@ sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/g' \
 exec "$CHROMIUM" \
     --kiosk \
     --noerrdialogs \
+    --hide-scrollbars \
     --disable-infobars \
     --no-first-run \
     --disable-translate \
