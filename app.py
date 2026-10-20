@@ -365,6 +365,21 @@ def load_token():
 
 # ── Auth ──
 
+def send_verify_code(email):
+    """Be Bambu sende innloggingskode på e-post. Kaster ValueError med Bambus svar ved feil."""
+    resp = requests.post(
+        f"{BAMBU_API}/v1/user-service/user/sendemail/code",
+        json={"email": email, "type": "codeLogin"},
+        timeout=10,
+    )
+    if not resp.ok:
+        try:
+            msg = resp.json().get("message") or ""
+        except ValueError:
+            msg = resp.reason or ""
+        raise ValueError(f"HTTP {resp.status_code}{': ' + str(msg)[:200] if msg else ''}")
+
+
 def login():
     email = os.getenv("BAMBU_EMAIL")
     password = os.getenv("BAMBU_PASSWORD")
@@ -376,14 +391,24 @@ def login():
         json={"account": email, "password": password},
         timeout=10,
     )
-    resp.raise_for_status()
-    data = resp.json()
+    try:
+        data = resp.json()
+    except ValueError:
+        data = {}
+    if not resp.ok:
+        # Ta med Bambus egen forklaring (feilsvar inneholder ingen token)
+        msg = data.get("message") or data.get("error") or resp.reason or ""
+        raise ValueError(f"Bambu avviste innlogging (HTTP {resp.status_code}){': ' + str(msg)[:200] if msg else ''}")
 
     login_type = data.get("loginType", "")
 
-    if login_type == "verifyCode":
+    if login_type in ("verifyCode", "tfa"):
         state["needs_verify_code"] = True
-        state["error"] = "Verifiseringskode sendt til e-post. Skriv inn koden nedenfor."
+        try:
+            send_verify_code(email)
+            state["error"] = "Verifiseringskode sendt til e-post. Skriv inn koden nedenfor."
+        except Exception as e:
+            state["error"] = f"Bambu krever kode, men utsending feilet: {e}"
         return
 
     _store_token(data)
@@ -1003,12 +1028,8 @@ def api_send_code():
     if not email:
         return jsonify({"ok": False, "error": "BAMBU_EMAIL ikke satt."}), 400
     try:
-        resp = requests.post(
-            f"{BAMBU_API}/v1/user-service/user/sendemail/code",
-            json={"email": email, "type": "codeLogin"},
-            timeout=10,
-        )
-        resp.raise_for_status()
+        send_verify_code(email)
+        state["needs_verify_code"] = True
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
