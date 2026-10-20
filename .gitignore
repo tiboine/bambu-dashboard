@@ -9,3 +9,6 @@ venv/
 *.egg-info/
 dist/
 .DS_Store
+stats_store.json
+stats_store.json.bak
+stats_store.json.tmp

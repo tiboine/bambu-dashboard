@@ -2,8 +2,12 @@ import os
 import json
 import time
 import ssl
+import shutil
+import socket
 import threading
 import base64
+from datetime import datetime, timezone
+from urllib.parse import urlparse
 import requests
 import paho.mqtt.client as mqtt
 from flask import Flask, jsonify, render_template, request as flask_request
@@ -15,18 +19,29 @@ load_dotenv()
 app = Flask(__name__)
 TOKEN_FILE  = Path(__file__).parent / ".token.json"
 STATS_FILE  = Path(__file__).parent / "stats_store.json"
+STATS_BAK   = STATS_FILE.with_suffix(".json.bak")
 
 WP_URL     = os.getenv("WP_URL", "").rstrip("/")
 WP_API_KEY = os.getenv("WP_API_KEY", "")
+WP_PUSH_MAX_PER_SYNC = 50   # maks antall WP-push per sync (unngå flom ved første kjøring)
+
+# Bambu task-status: 0/1 = opprettet/pågår, 2 = fullført. Alt annet (3 = feilet,
+# 4 = avbrutt, ukjente koder) regnes som ferdig men mislykket, slik som før.
+TASK_SUCCESS = 2
+TASK_RUNNING = (0, 1)
+
+def is_final_status(status):
+    return status not in TASK_RUNNING and status is not None
 
 # ── Lokal stats-lagring ──────────────────────────────────────────
 # Full task-liste lagres lokalt. Bambu API brukes kun for å fylle hull.
 # Schema: {
-#   "tasks":   { "<id>": {id, deviceId, title, startTime, costTime, weight, length, status, cover} },
+#   "tasks":   { "<id>": {id, deviceId, title, startTime, costTime, weight, length, status, cover, wp_synced} },
 #   "devices": { "<dev_id>": {name, model} },
 #   "sync":    { boundary, complete, newest, api_total, last_sync }
 # }
 _sync_lock = threading.Lock()   # én sync av gangen
+_store_unreadable = False       # True hvis både fil og .bak er korrupt – da lagrer vi ikke (unngå å slette historikk)
 
 def default_stats_store():
     return {
@@ -35,29 +50,54 @@ def default_stats_store():
         "sync":    {"boundary": None, "complete": False, "newest": None, "api_total": 0, "last_sync": None},
     }
 
+def _parse_store(data):
+    if "tasks" in data:
+        return data
+    # Migrer fra gammel aggregat-only schema: behold enhetsnavn, resync tasks
+    migrated = default_stats_store()
+    for dev_id, s in data.get("stats", {}).items():
+        migrated["devices"][dev_id] = {
+            "name":  s.get("name", dev_id),
+            "model": s.get("model", "Ukjent"),
+        }
+    return migrated
+
 def load_stats_store():
-    try:
-        if STATS_FILE.exists():
-            data = json.loads(STATS_FILE.read_text())
-            if "tasks" in data:
+    global _store_unreadable
+    if not STATS_FILE.exists() and not STATS_BAK.exists():
+        return default_stats_store()
+    for path in (STATS_FILE, STATS_BAK):
+        try:
+            if path.exists():
+                data = _parse_store(json.loads(path.read_text()))
+                if path == STATS_BAK:
+                    print(f"[Stats] Bruker sikkerhetskopi {STATS_BAK.name}")
                 return data
-            # Migrer fra gammel aggregat-only schema: behold enhetsnavn, resync tasks
-            migrated = default_stats_store()
-            for dev_id, s in data.get("stats", {}).items():
-                migrated["devices"][dev_id] = {
-                    "name":  s.get("name", dev_id),
-                    "model": s.get("model", "Ukjent"),
-                }
-            return migrated
-    except Exception as e:
-        print(f"[Stats] Kunne ikke lese stats_store.json: {e}")
+        except Exception as e:
+            print(f"[Stats] Kunne ikke lese {path.name}: {e}")
+    # Begge filer finnes men er uleselige – ikke overskriv dem
+    _store_unreadable = True
+    print("[Stats] Lagring er korrupt – lagring deaktivert til filene er fikset")
     return default_stats_store()
 
 def save_stats_store(store):
+    if _store_unreadable:
+        print("[Stats] Hopper over lagring (eksisterende fil er uleselig)")
+        return
     try:
         tmp = STATS_FILE.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(store))
-        tmp.replace(STATS_FILE)  # atomisk: lesere ser enten gammel eller ny fil
+        with open(tmp, "w") as f:
+            json.dump(store, f)
+            f.flush()
+            os.fsync(f.fileno())
+        # Ta vare på forrige fil som .bak, men kun hvis den er gyldig
+        if STATS_FILE.exists():
+            try:
+                json.loads(STATS_FILE.read_text())
+                shutil.copy2(STATS_FILE, STATS_BAK)
+            except Exception:
+                pass
+        os.replace(tmp, STATS_FILE)  # atomisk: lesere ser enten gammel eller ny fil
     except Exception as e:
         print(f"[Stats] Kunne ikke lagre stats_store.json: {e}")
 
@@ -65,6 +105,8 @@ def merge_task_into_store(store, task):
     tid = task.get("id")
     if tid is None:
         return
+    old = store["tasks"].get(str(tid), {})
+    status = task.get("status", 0)
     store["tasks"][str(tid)] = {
         "id":        tid,
         "deviceId":  task.get("deviceId", "unknown"),
@@ -74,27 +116,52 @@ def merge_task_into_store(store, task):
         "costTime":  task.get("costTime", 0) or 0,
         "weight":    task.get("weight", 0)   or 0,
         "length":    task.get("length", 0)   or 0,
-        "status":    task.get("status", 0),
+        "status":    status,
         "cover":     task.get("cover", ""),
+        # Behold synk-flagget bare hvis statusen ikke har endret seg siden push
+        "wp_synced": bool(old.get("wp_synced")) and old.get("status") == status,
     }
 
-def push_to_wordpress(task):
-    """Push ett task til WordPress i bakgrunn. Feiler stille."""
+def push_unsynced_to_wordpress(store):
+    """Push ferdige (ikke pågående) tasks som ikke er synket til WP. Kjøres i sync-tråden.
+    Setter wp_synced kun ved HTTP 2xx. Returnerer antall pushet."""
     if not WP_URL or not WP_API_KEY:
-        return
-    def _push():
+        return 0
+    pending = [t for t in store["tasks"].values()
+               if not t.get("wp_synced") and is_final_status(t.get("status"))]
+    pending.sort(key=lambda t: t.get("startTime", ""), reverse=True)
+    pushed = 0
+    for task in pending[:WP_PUSH_MAX_PER_SYNC]:
+        payload = {k: v for k, v in task.items() if k != "wp_synced"}
         try:
             resp = requests.post(
                 f"{WP_URL}/wp-json/bambu/v1/push-print",
-                json=task,
+                json=payload,
                 headers={"X-Bambu-Key": WP_API_KEY, "Content-Type": "application/json"},
                 timeout=10,
             )
-            if resp.ok and resp.json().get("inserted"):
-                print(f"[WP] Push OK: {task.get('id')}")
         except Exception as e:
-            print(f"[WP] Push feilet (ignorerer): {e}")
-    threading.Thread(target=_push, daemon=True).start()
+            print(f"[WP] Push feilet, prøver igjen ved neste sync: {e}")
+            break  # WP utilgjengelig – ikke prøv resten nå
+        if 200 <= resp.status_code < 300:
+            task["wp_synced"] = True
+            pushed += 1
+        else:
+            print(f"[WP] Push av {task.get('id')} feilet (HTTP {resp.status_code})")
+            if resp.status_code in (401, 403):
+                break  # feil nøkkel – resten vil også feile
+    if pushed:
+        print(f"[WP] Pushet {pushed} tasks ({len(pending) - pushed} gjenstår)")
+    return pushed
+
+
+def bambu_get(path, **kwargs):
+    """GET mot Bambu API. Ved 401 fornyes token én gang og kallet prøves på nytt."""
+    resp = requests.get(f"{BAMBU_API}{path}", headers=headers(), **kwargs)
+    if resp.status_code == 401 and handle_unauthorized():
+        resp = requests.get(f"{BAMBU_API}{path}", headers=headers(), **kwargs)
+    resp.raise_for_status()
+    return resp
 
 
 def fetch_task_page_raw(after=None):
@@ -102,13 +169,7 @@ def fetch_task_page_raw(after=None):
     params = {"limit": 100}
     if after:
         params["after"] = after
-    resp = requests.get(
-        f"{BAMBU_API}/v1/user-service/my/tasks",
-        headers=headers(),
-        params=params,
-        timeout=20,
-    )
-    resp.raise_for_status()
+    resp = bambu_get("/v1/user-service/my/tasks", params=params, timeout=20)
     data = resp.json()
     return data.get("hits", []), data.get("total", 0)
 
@@ -120,7 +181,8 @@ def sync_stats_store():
         return  # en sync kjører allerede
     try:
         store = load_stats_store()
-        devices = state.get("devices", {})
+        with _state_lock:
+            devices = {k: dict(v) for k, v in state["devices"].items()}
 
         # Oppdater enhets-metadata fra bind-API
         for dev_id, dev in devices.items():
@@ -138,15 +200,12 @@ def sync_stats_store():
         if api_total:
             store["sync"]["api_total"] = api_total
         if not recent:
+            push_unsynced_to_wordpress(store)
             save_stats_store(store)
             return
 
-        existing_ids = set(store["tasks"].keys())
         for task in recent:
-            tid = task.get("id")
             merge_task_into_store(store, task)
-            if tid and str(tid) not in existing_ids:
-                push_to_wordpress(task)
         boundary_id = recent[-1].get("id")
 
         # Historikk: fyll bakover til komplett, med loop-deteksjon og tidsbudsjett
@@ -168,11 +227,7 @@ def sync_stats_store():
                     break
                 seen.add(first_id)
                 for task in hits:
-                    tid = task.get("id")
-                    is_new = tid and str(tid) not in store["tasks"]
                     merge_task_into_store(store, task)
-                    if is_new:
-                        push_to_wordpress(task)
                 store["sync"]["boundary"] = hits[-1].get("id")
                 if len(hits) < 100:
                     store["sync"]["complete"] = True
@@ -184,6 +239,10 @@ def sync_stats_store():
 
         save_stats_store(store)
         print(f"[Stats] Lagret {len(store['tasks'])} tasks. API-total: {store['sync']['api_total']}, komplett: {store['sync']['complete']}")
+
+        # Push til WordPress etter lagring, og lagre wp_synced-flaggene
+        if push_unsynced_to_wordpress(store):
+            save_stats_store(store)
     finally:
         _sync_lock.release()
 
@@ -208,12 +267,15 @@ def aggregate_stats(store):
                 "_tasks":          [],
             }
         d = agg[dev_id]
+        d["_tasks"].append(task)
+        status = task.get("status")
+        if not is_final_status(status):
+            continue  # pågående/ukjent: ikke med i tellinger eller summer
         d["total_prints"] += 1
-        d["successful" if task.get("status") == 2 else "failed"] += 1
+        d["successful" if status == TASK_SUCCESS else "failed"] += 1
         d["total_time_s"]    += task.get("costTime", 0) or 0
         d["total_weight_g"]  += task.get("weight", 0)   or 0
         d["total_length_cm"] += task.get("length", 0)   or 0
-        d["_tasks"].append(task)
 
     for d in agg.values():
         d["_tasks"].sort(key=lambda t: t.get("startTime", ""), reverse=True)
@@ -231,11 +293,23 @@ def aggregate_stats(store):
 
 
 @app.after_request
-def add_cors_headers(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+def add_response_headers(response):
+    # CORS kun for lese-endepunkter (gammel WP-plugin leser dem fra annet domene)
+    if flask_request.method in ("GET", "HEAD"):
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET"
+    # Kiosk-Chromium cachet gamle sider – aldri cache HTML
+    if response.mimetype == "text/html":
+        response.headers["Cache-Control"] = "no-store"
     return response
+
+
+def is_same_origin():
+    """POST-endepunkter godtar kun forespørsler uten Origin eller fra samme vert."""
+    origin = flask_request.headers.get("Origin")
+    if not origin:
+        return True
+    return urlparse(origin).netloc == flask_request.host
 
 BAMBU_API = "https://api.bambulab.com"
 MQTT_BROKER = "us.mqtt.bambulab.com"
@@ -254,6 +328,10 @@ state = {
 }
 
 mqtt_client = None
+_mqtt_lock = threading.Lock()      # start/stopp av MQTT-klient
+_state_lock = threading.RLock()    # beskytter state["devices"] og state["mqtt_status"]
+_mqtt_down_since = None            # tidspunkt MQTT sist mistet/manglet forbindelse
+MQTT_RESTART_AFTER = 300           # sekunder frakoblet før vi lager ny klient (ellers reconnecter paho selv)
 
 
 # ── Token-persistering ──
@@ -265,6 +343,7 @@ def save_token():
             "user_id": state["user_id"],
             "token_expires": state["token_expires"],
         }))
+        os.chmod(TOKEN_FILE, 0o600)
     except Exception as e:
         print(f"[Advarsel] Kunne ikke lagre token: {e}")
 
@@ -313,17 +392,22 @@ def login():
 def _store_token(data):
     token = data.get("accessToken") or data.get("access_token")
     if not token:
-        raise ValueError(f"Fikk ikke token fra Bambu API: {data}")
+        # Ikke ta med selve responsen – den kan inneholde hemmeligheter
+        raise ValueError(f"Fikk ikke token fra Bambu API (loginType: {data.get('loginType') or 'ukjent'})")
     state["token"] = token
-    state["token_expires"] = time.time() + 86400 * 90
+    try:
+        expires_in = int(data.get("expiresIn") or 0)
+    except (TypeError, ValueError):
+        expires_in = 0
+    state["token_expires"] = time.time() + (expires_in if expires_in > 0 else 86400 * 90)
     state["needs_verify_code"] = False
     state["error"] = None
 
     # Hent user ID fra JWT (før save_token)
     try:
         payload = token.split(".")[1]
-        payload += "=" * (4 - len(payload) % 4)
-        decoded = json.loads(base64.b64decode(payload))
+        payload += "=" * (-len(payload) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(payload))
         state["user_id"] = str(decoded.get("sub") or decoded.get("uid") or "")
     except Exception:
         # Fallback: hent fra preference-endepunkt
@@ -361,47 +445,90 @@ def headers():
     return {"Authorization": f"Bearer {state['token']}"}
 
 
+_reauth_lock = threading.Lock()
+
+def handle_unauthorized():
+    """Token avvist (HTTP 401): logg inn på nytt én gang og restart MQTT. True hvis ny token."""
+    with _reauth_lock:
+        print("[Auth] Token avvist (401) – logger inn på nytt")
+        state["token"] = None
+        state["token_expires"] = 0
+        if state["needs_verify_code"]:
+            return False
+        try:
+            login()
+        except Exception as e:
+            state["error"] = f"Innlogging feilet: {e}"
+            return False
+        if not state["token"]:
+            return False  # krever verifiseringskode
+        start_mqtt()
+        return True
+
+
 # ── Device list (REST, kjøres én gang) ──
 
 def fetch_device_list():
     ensure_token()
 
-    bind_resp = requests.get(
-        f"{BAMBU_API}/v1/iot-service/api/user/bind",
-        headers=headers(),
-        timeout=10,
-    )
-    bind_resp.raise_for_status()
+    bind_resp = bambu_get("/v1/iot-service/api/user/bind", timeout=10)
     devices = bind_resp.json().get("devices", [])
 
-    for dev in devices:
-        dev_id = dev["dev_id"]
-        state["devices"][dev_id] = {
-            "id": dev_id,
-            "name": dev.get("name", dev_id),
-            "model": dev.get("dev_product_name", "Ukjent"),
-            "online": dev.get("online", False),
-        }
+    with _state_lock:
+        for dev in devices:
+            dev_id = dev["dev_id"]
+            state["devices"][dev_id] = {
+                "id": dev_id,
+                "name": dev.get("name", dev_id),
+                "model": dev.get("dev_product_name", "Ukjent"),
+                "online": dev.get("online", False),
+            }
 
     state["last_updated"] = time.strftime("%H:%M:%S")
+    state["error"] = None
     print(f"[Info] Hentet {len(devices)} enheter fra Bambu Lab")
 
 
 # ── MQTT for sanntidsstatus ──
 
+def safe_callback(fn):
+    """Fang alle feil i MQTT-callbacks så nettverkstråden ikke dør."""
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            print(f"[MQTT] Feil i {fn.__name__}: {e}")
+    wrapper.__name__ = fn.__name__
+    return wrapper
+
+
+@safe_callback
 def on_connect(client, userdata, flags, reason_code, properties=None):
+    global _mqtt_down_since
+    # paho v2 kaller on_connect også når CONNACK avvises
+    if reason_code.is_failure:
+        print(f"[MQTT] Tilkobling avvist (reason: {reason_code})")
+        state["mqtt_connected"] = False
+        state["error"] = f"MQTT-tilkobling avvist: {reason_code}"
+        return
+
     print(f"[MQTT] Koblet til (reason: {reason_code})")
     state["mqtt_connected"] = True
+    state["error"] = None
+    _mqtt_down_since = None
+
+    with _state_lock:
+        dev_ids = list(state["devices"])
 
     # Abonner på alle enheter
-    for dev_id in state["devices"]:
+    for dev_id in dev_ids:
         topic = f"device/{dev_id}/report"
         client.subscribe(topic)
         print(f"[MQTT] Abonnerer på {topic}")
 
     # Be om full status-dump fra alle printere
     time.sleep(1)
-    for dev_id in state["devices"]:
+    for dev_id in dev_ids:
         request_topic = f"device/{dev_id}/request"
         pushall = json.dumps({
             "pushing": {
@@ -415,11 +542,22 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
         print(f"[MQTT] Sendte pushall til {dev_id}")
 
 
+@safe_callback
 def on_disconnect(client, userdata, flags, reason_code, properties=None):
+    global _mqtt_down_since
     print(f"[MQTT] Frakoblet (reason: {reason_code})")
     state["mqtt_connected"] = False
+    if _mqtt_down_since is None:
+        _mqtt_down_since = time.time()
 
 
+def _has_tray_data(ams):
+    return isinstance(ams, dict) and any(
+        isinstance(u, dict) and u.get("tray") for u in ams.get("ams", []) or []
+    )
+
+
+@safe_callback
 def on_message(client, userdata, msg):
     try:
         data = json.loads(msg.payload)
@@ -436,67 +574,105 @@ def on_message(client, userdata, msg):
     if not print_data:
         return
 
-    # Oppdater MQTT-status (merge delta-oppdateringer)
-    if dev_id not in state["mqtt_status"]:
-        state["mqtt_status"][dev_id] = {}
+    job_finished = False
+    with _state_lock:
+        # Oppdater MQTT-status (merge delta-oppdateringer)
+        current = state["mqtt_status"].setdefault(dev_id, {})
 
-    prev_state = state["mqtt_status"][dev_id].get("gcode_state", "")
-    state["mqtt_status"][dev_id].update(print_data)
-    new_state = state["mqtt_status"][dev_id].get("gcode_state", "")
+        # AMS-delta uten tray-data skal ikke overskrive kjente filamentfarger
+        if "ams" in print_data:
+            print_data = dict(print_data)
+            incoming = print_data.pop("ams")
+            old_ams = current.get("ams") or {}
+            if _has_tray_data(incoming):
+                current["ams"] = {**old_ams, **incoming}
+            elif isinstance(incoming, dict):
+                current["ams"] = {**old_ams, **{k: v for k, v in incoming.items() if k != "ams"}}
 
-    # Registrer tidspunkt når en ny jobb starter
-    if new_state in ("RUNNING", "PREPARE") and prev_state not in ("RUNNING", "PREPARE"):
-        state["mqtt_status"][dev_id]["job_started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-    # Nullstill job_started_at når jobben er ferdig/avbrutt
-    elif new_state in ("IDLE", "FAILED", "FINISH") and prev_state in ("RUNNING", "PREPARE", "PAUSE"):
-        state["mqtt_status"][dev_id]["job_started_at"] = None
+        prev_state = current.get("gcode_state", "")
+        current.update(print_data)
+        new_state = current.get("gcode_state", "")
+
+        # Registrer tidspunkt når en ny jobb starter
+        if new_state in ("RUNNING", "PREPARE") and prev_state not in ("RUNNING", "PREPARE"):
+            current["job_started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        # Nullstill job_started_at når jobben er ferdig/avbrutt
+        elif new_state in ("IDLE", "FAILED", "FINISH") and prev_state in ("RUNNING", "PREPARE", "PAUSE"):
+            current["job_started_at"] = None
+            job_finished = True
+
+        # Oppdater online-status
+        if dev_id in state["devices"]:
+            state["devices"][dev_id]["online"] = True
+
+    if job_finished:
         threading.Thread(target=sync_stats_store, daemon=True).start()
-
-    # Oppdater online-status
-    if dev_id in state["devices"]:
-        state["devices"][dev_id]["online"] = True
 
     state["last_updated"] = time.strftime("%H:%M:%S")
 
 
-def start_mqtt():
+def _stop_client_locked():
+    """Stopp eksisterende klient. Må kalles med _mqtt_lock holdt."""
     global mqtt_client
+    if mqtt_client:
+        try:
+            mqtt_client.loop_stop()
+            mqtt_client.disconnect()
+        except Exception as e:
+            print(f"[MQTT] Feil ved stopp av klient: {e}")
+        mqtt_client = None
+    state["mqtt_connected"] = False
+
+
+def start_mqtt():
+    """(Re)start MQTT. Eksisterende klient stoppes først så vi ikke får flere parallelle."""
+    global mqtt_client, _mqtt_down_since
 
     if not state["token"] or not state["user_id"]:
         print("[MQTT] Mangler token eller user_id, kan ikke koble til")
         return
 
-    mqtt_client = mqtt.Client(
-        callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-        client_id=f"dashboard_{int(time.time())}",
-        protocol=mqtt.MQTTv311,
-    )
-    mqtt_client.username_pw_set(
-        f"u_{state['user_id']}",
-        state["token"],
-    )
-    mqtt_client.tls_set(cert_reqs=ssl.CERT_REQUIRED, tls_version=ssl.PROTOCOL_TLS_CLIENT)
+    with _mqtt_lock:
+        _stop_client_locked()
+        _mqtt_down_since = time.time()  # nullstilles i on_connect ved suksess
 
-    mqtt_client.on_connect = on_connect
-    mqtt_client.on_disconnect = on_disconnect
-    mqtt_client.on_message = on_message
+        client = mqtt.Client(
+            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+            client_id=f"dashboard_{int(time.time())}",
+            protocol=mqtt.MQTTv311,
+        )
+        client.username_pw_set(
+            f"u_{state['user_id']}",
+            state["token"],
+        )
+        client.tls_set(cert_reqs=ssl.CERT_REQUIRED, tls_version=ssl.PROTOCOL_TLS_CLIENT)
 
-    try:
-        mqtt_client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
-        mqtt_client.loop_start()
-        print(f"[MQTT] Starter tilkobling til {MQTT_BROKER}...")
-    except Exception as e:
-        print(f"[MQTT] Feil ved tilkobling: {e}")
-        state["error"] = f"MQTT-feil: {e}"
+        client.on_connect = on_connect
+        client.on_disconnect = on_disconnect
+        client.on_message = on_message
+
+        try:
+            client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+            client.loop_start()
+            mqtt_client = client
+            print(f"[MQTT] Starter tilkobling til {MQTT_BROKER}...")
+        except Exception as e:
+            print(f"[MQTT] Feil ved tilkobling: {e}")
+            state["error"] = f"MQTT-feil: {e}"
 
 
 def stop_mqtt():
-    global mqtt_client
-    if mqtt_client:
-        mqtt_client.loop_stop()
-        mqtt_client.disconnect()
-        mqtt_client = None
-        state["mqtt_connected"] = False
+    with _mqtt_lock:
+        _stop_client_locked()
+
+
+def mqtt_needs_restart():
+    """Ny klient trengs kun hvis ingen finnes, eller den har vært nede lenge (paho reconnecter selv ellers)."""
+    if mqtt_client is None:
+        return True
+    if state["mqtt_connected"] or _mqtt_down_since is None:
+        return False
+    return time.time() - _mqtt_down_since > MQTT_RESTART_AFTER
 
 
 # ── Hent forhåndsvisningsbilder fra tasks API ──
@@ -507,23 +683,30 @@ def fetch_task_covers():
         return
 
     try:
-        resp = requests.get(
-            f"{BAMBU_API}/v1/user-service/my/tasks",
-            headers=headers(),
-            params={"limit": 50},
-            timeout=10,
-        )
-        resp.raise_for_status()
+        resp = bambu_get("/v1/user-service/my/tasks", params={"limit": 50}, timeout=10)
         tasks = resp.json().get("hits", [])
 
-        # Lagre siste cover per device (første treff = nyeste oppgave)
+        # Lagre siste cover + nyeste task per device (første treff = nyeste oppgave).
+        # Nyeste task brukes til å regne dagens filamentforbruk for pågående prints.
         covers = {}
+        latest = {}
         for task in tasks:
             dev_id = task.get("deviceId")
+            if not dev_id:
+                continue
             cover = task.get("cover")
-            if dev_id and cover and dev_id not in covers:
+            if cover and dev_id not in covers:
                 covers[dev_id] = cover
+            if dev_id not in latest:
+                latest[dev_id] = {
+                    "id":        str(task.get("id", "")),
+                    "startTime": task.get("startTime", ""),
+                    "weight":    task.get("weight", 0) or 0,
+                    "length":    task.get("length", 0) or 0,
+                    "status":    task.get("status"),
+                }
         state["task_covers"] = covers
+        state["latest_tasks"] = latest
     except Exception as e:
         print(f"[Feil] Kunne ikke hente task covers: {e}")
 
@@ -532,8 +715,11 @@ def fetch_task_covers():
 
 def build_printer_list():
     printers = []
-    for dev_id, dev in state["devices"].items():
-        mqtt_data = state["mqtt_status"].get(dev_id, {})
+    # Snapshot under lås – MQTT-tråden kan endre dataene samtidig
+    with _state_lock:
+        snapshot = [(dev_id, dict(dev), dict(state["mqtt_status"].get(dev_id, {})))
+                    for dev_id, dev in state["devices"].items()]
+    for dev_id, dev, mqtt_data in snapshot:
 
         gcode_state = mqtt_data.get("gcode_state", "")
         progress = mqtt_data.get("mc_percent")
@@ -614,12 +800,12 @@ def build_printer_list():
 
 def wait_for_network(timeout=60):
     """Vent til internett er tilgjengelig (maks timeout sekunder)."""
-    import socket
     print("[Nettverk] Venter på internettforbindelse...")
     for i in range(timeout):
         try:
-            socket.setdefaulttimeout(3)
-            socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect(("8.8.8.8", 53))
+            # Timeout per socket (ikke globalt), og lukk socketen etterpå
+            with socket.create_connection(("8.8.8.8", 53), timeout=3):
+                pass
             print(f"[Nettverk] Tilkoblet etter {i}s")
             return True
         except OSError:
@@ -654,7 +840,7 @@ def poll_loop():
             try:
                 fetch_device_list()
                 fetch_task_covers()
-                if not state["mqtt_connected"]:
+                if mqtt_needs_restart():
                     start_mqtt()
                 # Sync stats hvert 5. minutt (eller første gang)
                 stats_tick += 1
@@ -684,28 +870,78 @@ def api_status():
     })
 
 
+def local_date(iso_utc):
+    """Konverter Bambu startTime (ISO, UTC) til lokal dato. None hvis ugyldig."""
+    if not iso_utc:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_utc.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone().date()
+
+
 @app.route("/api/today")
 def api_today():
-    """Hent dagens printstatistikk fra lokal lagring."""
-    from datetime import datetime, timezone
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    """Dagens printstatistikk: ferdige prints i dag + pågående prints regnet ut fra fremdrift."""
+    now = datetime.now(timezone.utc)
+    today = now.astimezone().date()  # lokal dato
     store = load_stats_store()
     prints = 0
-    weight = 0
+    weight = 0.0
     time_s = 0
-    length_cm = 0
-    for task in store.get("tasks", {}).values():
-        start = task.get("startTime", "")
-        if start and start[:10] == today:
-            prints    += 1
-            weight    += task.get("weight", 0)   or 0
-            time_s    += task.get("costTime", 0) or 0
-            length_cm += task.get("length", 0)   or 0
+    length_cm = 0.0
+    final_ids = set()
+
+    # 1) Ferdige prints som startet i dag – fullt forbruk
+    for tid, task in store.get("tasks", {}).items():
+        if not is_final_status(task.get("status")):
+            continue  # pågående telles live under
+        final_ids.add(str(tid))
+        if local_date(task.get("startTime", "")) != today:
+            continue
+        prints    += 1
+        time_s    += task.get("costTime", 0) or 0
+        weight    += task.get("weight", 0) or 0
+        length_cm += task.get("length", 0) or 0
+
+    # 2) Pågående prints – planlagt forbruk × fremdrift, tid = medgått tid så langt
+    with _state_lock:
+        live = [(dev_id, dict(m)) for dev_id, m in state["mqtt_status"].items()]
+    latest = state.get("latest_tasks", {})
+    active = 0
+    for dev_id, m in live:
+        if m.get("gcode_state") not in ("RUNNING", "PREPARE", "PAUSE"):
+            continue
+        active += 1
+        prints += 1
+        task = latest.get(dev_id)
+        if not task or task["id"] in final_ids:
+            continue  # task ikke hentet ennå (startet nettopp) – telles uten forbruk
+        try:
+            pct = max(0.0, min(100.0, float(m.get("mc_percent") or 0))) / 100
+        except (TypeError, ValueError):
+            pct = 0.0
+        weight    += task["weight"] * pct
+        length_cm += task["length"] * pct
+        try:
+            start = datetime.fromisoformat(task["startTime"].replace("Z", "+00:00"))
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            # Bare tiden som faller i dag (print som startet før midnatt)
+            day_start = datetime.combine(today, datetime.min.time()).astimezone()
+            time_s += max(0, int((now - max(start, day_start)).total_seconds()))
+        except (ValueError, AttributeError):
+            pass
+
     return jsonify({
         "prints":    prints,
-        "weight_g":  weight,
+        "active":    active,
+        "weight_g":  round(weight, 1),
         "time_s":    time_s,
-        "length_cm": length_cm,
+        "length_cm": round(length_cm, 1),
         "last_sync": store.get("sync", {}).get("last_sync"),
     })
 
@@ -721,6 +957,12 @@ def api_stats():
     store = load_stats_store()
     agg = aggregate_stats(store)
     total = sum(d["total_prints"] for d in agg.values())
+    # Printere som ikke lenger er koblet til kontoen telles i totalene, men får ikke eget kort.
+    # Bare når enhetslisten faktisk er hentet, ellers ville alt blitt skjult ved oppstart/API-feil.
+    with _state_lock:
+        current = set(state["devices"].keys())
+    for d in agg.values():
+        d["removed"] = bool(current) and d["device_id"] not in current
     return jsonify({
         "devices":       list(agg.values()),
         "total_tasks":   total,
@@ -734,7 +976,9 @@ def api_stats():
 def api_ams_colors():
     """Returner nåværende AMS-filamentfarger per enhet."""
     result = {}
-    for dev_id, mqtt_data in state["mqtt_status"].items():
+    with _state_lock:
+        snapshot = [(dev_id, dict(d)) for dev_id, d in state["mqtt_status"].items()]
+    for dev_id, mqtt_data in snapshot:
         colors = []
         ams_data = mqtt_data.get("ams", {})
         for ams_unit in ams_data.get("ams", []):
@@ -753,6 +997,8 @@ def api_ams_colors():
 
 @app.route("/api/send-code", methods=["POST"])
 def api_send_code():
+    if not is_same_origin():
+        return jsonify({"ok": False, "error": "Forespørsel fra annet domene avvist."}), 403
     email = os.getenv("BAMBU_EMAIL")
     if not email:
         return jsonify({"ok": False, "error": "BAMBU_EMAIL ikke satt."}), 400
@@ -770,8 +1016,10 @@ def api_send_code():
 
 @app.route("/api/verify", methods=["POST"])
 def api_verify():
-    data = flask_request.get_json()
-    code = data.get("code", "").strip()
+    if not is_same_origin():
+        return jsonify({"ok": False, "error": "Forespørsel fra annet domene avvist."}), 403
+    data = flask_request.get_json(silent=True) or {}
+    code = str(data.get("code", "")).strip()
     if not code:
         return jsonify({"ok": False, "error": "Ingen kode oppgitt."}), 400
     try:

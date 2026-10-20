@@ -1,607 +1,1026 @@
 /**
- * Bambu Lab 3D Print Dashboard – WordPress PHP Plugin v1.0.8
+ * Bambu Lab 3D Print Dashboard – WordPress PHP Plugin (HUD-design)
+ *
+ * Samme oppførsel som Raspberry Pi-dashboardet: kortene bygges én gang og
+ * oppdateres på plass (ingen innerHTML-ombygging → ingen blinking), all
+ * data fra API-et settes med textContent, og bilder byttes bare når selve
+ * filen er en annen.
  */
 (function () {
   'use strict';
 
-  const cfg  = (typeof bambuConfig !== 'undefined') ? bambuConfig : {};
-  const REST = (cfg.restUrl || '/wp-json/').replace(/\/$/, '') + '/bambu/v1';
-  const finishedAt = {};
+  const cfg = (typeof window.bambuConfig === 'object' && window.bambuConfig) ? window.bambuConfig : {};
+  // restBase mangler i eldre PHP-versjoner – bygg den fra restUrl.
+  const REST_BASE = String(cfg.restBase || (String(cfg.restUrl || '/wp-json/').replace(/\/$/, '') + '/bambu/v1')).replace(/\/$/, '');
+
+  const POLL_STATUS_MS = 30000;
+  const POLL_TODAY_MS  = 30000;  // pågående prints endrer "I dag"-tallene fortløpende
+  const THEME_KEY      = 'bambu_theme';
+  const STATS_KEY      = 'bambu_stats_v1';
+
+  // ── Små hjelpere ────────────────────────────────────────────────────────
+
+  const $ = (sel, root) => (root || document).querySelector(sel);
+  const collator = new Intl.Collator('no', { numeric: true, sensitivity: 'base' });
+
+  function setText(el, v) { v = v == null ? '' : String(v); if (el.textContent !== v) el.textContent = v; }
+  function setHidden(el, h) { h = !!h; if (el.hidden !== h) el.hidden = h; }
+  function setTransform(el, v) { if (el.style.transform !== v) el.style.transform = v; }
+  function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  function num(v) { const n = Number(v); return isFinite(n) ? n : 0; }
+  function pad2(n) { return String(n).padStart(2, '0'); }
+  function hhmm(d) { return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); }
+
+  // Lager et element. Tekst settes alltid som textContent, aldri som HTML.
+  function h(tag, cls, text) {
+    const el = document.createElement(tag);
+    if (cls) el.className = cls;
+    if (text != null) el.textContent = String(text);
+    return el;
+  }
+
+  // Kun for faste, interne SVG-/mal-strenger (aldri data fra API-et).
+  function fromHTML(html) {
+    const t = document.createElement('template');
+    t.innerHTML = html.trim();
+    return t.content.firstElementChild;
+  }
+
+  // Bygg REST-URL som virker både med pene permalenker (/wp-json/bambu/v1)
+  // og enkle permalenker (?rest_route=/bambu/v1).
+  function apiUrl(path, params) {
+    const u = new URL(REST_BASE, location.href);
+    const route = u.searchParams.get('rest_route');
+    if (route != null) u.searchParams.set('rest_route', route.replace(/\/$/, '') + path);
+    else u.pathname = u.pathname.replace(/\/$/, '') + path;
+    if (params) Object.keys(params).forEach(k => u.searchParams.set(k, String(params[k])));
+    return u.toString();
+  }
+
+  async function fetchJSON(path, params) {
+    const res = await fetch(apiUrl(path, params), { cache: 'no-store', credentials: 'same-origin', headers: { Accept: 'application/json' } });
+    let data = null;
+    try { data = await res.json(); } catch (e) { /* ikke JSON */ }
+    if (!res.ok) {
+      const err = new Error(data && typeof data.message === 'string' ? data.message : 'HTTP ' + res.status);
+      err.status = res.status;
+      throw err;
+    }
+    if (!data || typeof data !== 'object') throw new Error('Ugyldig svar fra serveren');
+    return data;
+  }
+
+  // Bare http(s) (eller relative, dvs. samme opprinnelse) – aldri javascript:/data:
+  function safeUrl(url) {
+    if (!url || typeof url !== 'string') return '';
+    try {
+      const u = new URL(url, location.href);
+      return (u.protocol === 'https:' || u.protocol === 'http:') ? u.href : '';
+    } catch (e) { return ''; }
+  }
+
+  // Demomodus slås på med ?bambu_demo i URL-en eller [bambu_dashboard demo="true"]
+  // Gjør det lett å se i konsollen hvilken versjon nettleseren faktisk har lastet
+  console.info('[bambu] Bambu Dashboard v' + (cfg.version || '?'));
+
+  const DEMO_URL = /[?&](bambu_)?demo(=|&|$)/.test(location.search);
+
+  // ── Demomodus: oppdiktede printere som "printer" (?demo / ?bambu_demo) ──
+  // Bruker ekte printernavn når de finnes, ellers en liten fiktiv flåte.
+  const DEMO_JOBS = [
+    ['Benchy.3mf', 900, '#ff8a3d'],
+    ['Telefonholder_v2.3mf', 1500, '#4fc3f7'],
+    ['Navneskilt_Ringebu.3mf', 1200, '#9ccc65'],
+    ['Vase_spiral.3mf', 2100, '#f06292'],
+    ['Kabelklips_x10.3mf', 600, '#ffd54f'],
+  ];
+  const DEMO_AMS = [
+    [{ color: '#ff6a00', type: 'PLA' }, { color: '#1e88e5', type: 'PETG' }, { color: '#ffffff', type: 'PLA' }, { color: '#212121', type: 'PLA' }],
+    [{ color: '#43a047', type: 'PLA' }],
+    [{ color: '#e53935', type: 'PLA' }, { color: '#fdd835', type: 'PLA' }],
+  ];
+  function demoThumb(color) {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><g stroke="#1a1a1a" stroke-width="3" stroke-linejoin="round">'
+      + '<path fill="' + color + '" d="M100 28 164 62v76l-64 34-64-34V62z"/>'
+      + '<path fill="rgba(0,0,0,.18)" d="M100 96v76l64-34V62z"/><path fill="rgba(255,255,255,.25)" d="M36 62l64 34 64-34-64-34z"/></g></svg>';
+    return 'data:image/svg+xml;base64,' + btoa(svg);
+  }
+  function demoPrinters(real) {
+    const fleet = (real && real.length ? real : ['Mini 1', 'Mini 2', 'Mini 3', 'Mini 4', 'Mini 5', 'Mini 6', 'Mini 7', 'X1 Carbon']
+      .map((n, i) => ({ id: 'demo' + i, name: n, model: n.startsWith('Mini') ? 'A1 mini' : 'X1 Carbon', online: true })));
+    const now = Date.now() / 1000;
+    return fleet.map((p, i) => {
+      const [title, dur, color] = DEMO_JOBS[i % DEMO_JOBS.length];
+      const role = i === fleet.length - 1 && fleet.length > 4 ? 'offline' : ['print', 'print', 'idle', 'print', 'paused', 'print'][i % 6];
+      const base = { id: p.id, name: p.name, model: p.model, online: role !== 'offline', print_status: 'IDLE',
+        task_name: null, progress: null, time_remaining: null, layer: null, total_layers: null,
+        nozzle_temp: 25 + (i % 3), bed_temp: 23 + (i % 2), spd_lvl: 2, ams_colors: DEMO_AMS[i % DEMO_AMS.length], thumbnail: null };
+      if (role === 'offline' || role === 'idle') return base;
+      const layers = Math.round(dur / 6);
+      if (role === 'paused') {
+        return Object.assign(base, { _plan_g: Math.round(dur / 25), print_status: 'PAUSED', task_name: title, progress: 63, time_remaining: Math.round(dur * 0.37) * 6,
+          layer: Math.round(layers * 0.63), total_layers: layers, nozzle_temp: 180, bed_temp: 60, thumbnail: demoThumb(color) });
+      }
+      // Syklus: printer i `dur` sekunder, er "ferdig" i 45 s, starter på nytt
+      const t = (now + i * 211) % (dur + 45);
+      if (t >= dur) return Object.assign(base, { print_status: 'SUCCESS', task_name: title, progress: 100, thumbnail: demoThumb(color) });
+      const pct = Math.floor(t / dur * 100);
+      return Object.assign(base, { _plan_g: Math.round(dur / 25), print_status: 'RUNNING', task_name: title, progress: pct,
+        time_remaining: Math.round((dur - t) * 6), layer: Math.max(1, Math.round(layers * pct / 100)), total_layers: layers,
+        nozzle_temp: 218 + (i % 5), bed_temp: 60 + (i % 3) * 5, spd_lvl: [2, 3, 2, 4][i % 4], thumbnail: demoThumb(color) });
+    });
+  }
+  // "I dag" i demo: faste ferdige prints + pågående prints × fremdrift (tallene vokser)
+  function demoToday(list) {
+    const d = { prints: 9, weight_g: 381.6, time_s: 21600, length_cm: 12720 };
+    (list || []).forEach(p => {
+      if (!p._plan_g || (p.print_status !== 'RUNNING' && p.print_status !== 'PAUSED')) return;
+      const pct = (p.progress || 0) / 100;
+      d.prints += 1;
+      d.weight_g += p._plan_g * pct;
+      d.length_cm += p._plan_g * 33.3 * pct;
+      d.time_s += Math.round(p._plan_g * 25 * pct);
+    });
+    return d;
+  }
+
+  // Bambu-cover-URL-er er signerte og får ny query-streng jevnlig. For bilder fra
+  // andre domener sammenlignes derfor URL uten query; egne (proxy-)URL-er sammenlignes hele.
+  function thumbKey(href) {
+    try {
+      const u = new URL(href);
+      return u.origin === location.origin ? u.href : u.origin + u.pathname;
+    } catch (e) { return href; }
+  }
+
+  function linkButton(url, label) {
+    const href = safeUrl(url);
+    if (!href || !label) return null;
+    const a = h('a', 'bambu-link-btn', label);
+    a.href = href;   // samme fane – nytt vindu "forsvinner" i fullskjerm/kiosk
+    return a;
+  }
+
+  // ── Formatering ─────────────────────────────────────────────────────────
+
+  function formatLeft(s) {
+    s = num(s);
+    if (s <= 0) return '';
+    const hh = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    if (hh > 0) return hh + 't ' + m + 'm igjen';
+    if (m > 0) return m + ' min igjen';
+    return 'under 1 min';
+  }
+  function finishClock(s) {
+    s = num(s);
+    if (s <= 0) return '';
+    const d = new Date(Date.now() + s * 1000);
+    const days = Math.round((new Date(d).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 864e5);
+    return days >= 1 ? (days === 1 ? 'i morgen' : '+' + days + 'd') + ' ' + hhmm(d) : hhmm(d);
+  }
+  function formatWeight(g) { g = num(g); return g >= 1000 ? (g / 1000).toFixed(1) + ' kg' : Math.round(g) + ' g'; }
+  function formatLength(cm) { const m = num(cm) / 100; return m >= 1000 ? (m / 1000).toFixed(1) + ' km' : Math.round(m) + ' m'; }
+  function formatDuration(s) {
+    s = num(s);
+    const hh = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    if (hh >= 24) return Math.floor(hh / 24) + 'd ' + (hh % 24) + 't';
+    return hh > 0 ? hh + 't ' + m + 'm' : m + 'm';
+  }
+  function formatInt(n) { return Math.round(num(n)).toLocaleString('nb-NO'); }
+
+  // ── Ikoner (faste strenger) ─────────────────────────────────────────────
+
+  const ICON = {
+    moon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z"/></svg>',
+    sun: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>',
+    warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>',
+    download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M7 10l5 5 5-5M12 15V3"/></svg>',
+  };
 
   // ── Tema ────────────────────────────────────────────────────────────────
+  // Én felles håndtering for både fullskjerm-siden og alle wraps.
 
-  function isDark(wrap) {
-    return wrap.classList.contains('bambu-dark') ||
-      (!wrap.classList.contains('bambu-light') && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  function wrapTheme(wrap) {
+    const saved = lsGet(THEME_KEY);
+    if (saved === 'dark' || saved === 'light') return saved;
+    if (wrap && wrap.classList.contains('bambu-light')) return 'light';
+    return 'dark';  // standard når ingenting er valgt
   }
 
-  function applyTheme(wrap, dark) {
-    if (dark) {
-      wrap.classList.add('bambu-dark');
-      wrap.classList.remove('bambu-light');
+  function setWrapTheme(wrap, theme) {
+    wrap.classList.toggle('bambu-dark', theme === 'dark');
+    wrap.classList.toggle('bambu-light', theme === 'light');
+  }
+
+  function applyPageTheme(theme, persist) {
+    const dark = theme !== 'light';
+    document.querySelectorAll('.bambu-wrap').forEach(w => setWrapTheme(w, dark ? 'dark' : 'light'));
+    const page = $('.bambu-fs-page');
+    if (page) {
+      page.classList.toggle('fs-dark', dark);
+      page.classList.toggle('fs-light', !dark);
+      document.documentElement.classList.toggle('bambu-fs-light', !dark);
+    }
+    const btn = document.getElementById('bambu-theme-toggle');
+    if (btn) {
+      btn.innerHTML = dark ? ICON.sun : ICON.moon;  // fast ikon-streng
+      btn.title = dark ? 'Bytt til lyst tema' : 'Bytt til mørkt tema';
+      btn.setAttribute('aria-label', btn.title);
+    }
+    if (persist) lsSet(THEME_KEY, dark ? 'dark' : 'light');
+  }
+
+  function initTheme() {
+    const wraps = document.querySelectorAll('.bambu-wrap');
+    if ($('.bambu-fs-page')) {
+      applyPageTheme(wrapTheme(wraps[0]), false);
     } else {
-      wrap.classList.add('bambu-light');
-      wrap.classList.remove('bambu-dark');
+      wraps.forEach(w => setWrapTheme(w, wrapTheme(w)));
     }
-    try { localStorage.setItem('bambu_theme', dark ? 'dark' : 'light'); } catch (e) {}
-    // Oppdater ikon på toggle-knappen
-    const btn = wrap.closest('.bambu-fs-page, body')
-                    ?.querySelector?.('#bambu-theme-toggle');
-    if (btn) btn.innerHTML = dark ? iconSun() : iconMoon();
-  }
-
-  function iconMoon() {
-    return '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z"/></svg>';
-  }
-
-  function iconSun() {
-    return '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>';
-  }
-
-  // Sett initialt tema fra localStorage
-  function initTheme(wrap) {
-    let saved;
-    try { saved = localStorage.getItem('bambu_theme'); } catch (e) {}
-    if (saved === 'dark') applyTheme(wrap, true);
-    else if (saved === 'light') applyTheme(wrap, false);
-    // Ellers: auto (CSS media query)
-  }
-
-  // ── Helpers ─────────────────────────────────────────────────────────────
-
-  function formatTime(s) {
-    if (!s || s <= 0) return null;
-    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-    if (h > 0) return h + 't ' + m + 'm';
-    if (m > 0) return m + ' min';
-    return 'Under 1 min';
-  }
-
-  function estimatedFinish(s) {
-    if (!s || s <= 0) return null;
-    const d = new Date(Date.now() + s * 1000);
-    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
-  }
-
-  function speedLabel(lvl) {
-    return { 1: 'Stille', 2: 'Normal', 3: 'Sport', 4: 'Ludicrous' }[lvl] || null;
-  }
-
-  function formatWeight(g) {
-    if (!g) return '0g';
-    return g >= 1000 ? (g / 1000).toFixed(1) + 'kg' : Math.round(g) + 'g';
-  }
-
-  function formatMeters(cm) {
-    const m = cm / 100;
-    return m >= 1000 ? (m / 1000).toFixed(1) + 'km' : Math.round(m) + 'm';
-  }
-
-  function formatDuration(s) {
-    if (!s) return '0t';
-    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-    if (h > 24) return Math.floor(h / 24) + 'd ' + (h % 24) + 't';
-    if (h > 0) return h + 't ' + m + 'm';
-    return m + 'm';
-  }
-
-  // ── Status-logikk ────────────────────────────────────────────────────────
-
-  function getStatus(p) {
-    const s = (p.print_status || '').toUpperCase();
-    if (s === 'SUCCESS' || s === 'FINISH') {
-      if (!finishedAt[p.id]) finishedAt[p.id] = Date.now();
-      if (Date.now() - finishedAt[p.id] < 120000) return 'JUST_DONE';
-      return 'IDLE';
+    const btn = document.getElementById('bambu-theme-toggle');
+    if (btn) {
+      btn.addEventListener('click', () => {
+        const page = $('.bambu-fs-page');
+        const first = $('.bambu-wrap');
+        const isLight = page ? page.classList.contains('fs-light') : !!(first && first.classList.contains('bambu-light'));
+        applyPageTheme(isLight ? 'dark' : 'light', true);
+      });
     }
-    if (finishedAt[p.id]) delete finishedAt[p.id];
-    return s;
   }
 
-  function statusBadge(p) {
-    if (!p.online) return { t: 'Offline',  c: 'bambu-badge-offline' };
-    const s = getStatus(p);
-    if (s === 'RUNNING'  || s === 'PRINTING') return { t: 'Printer', c: 'bambu-badge-printing' };
-    if (s === 'FAIL'     || s === 'FAILED')   return { t: 'Feil',    c: 'bambu-badge-offline' };
-    if (s === 'PAUSED'   || s === 'PAUSE')    return { t: 'Pauset',  c: 'bambu-badge-printing' };
-    if (s === 'JUST_DONE')                    return { t: 'Ferdig',  c: 'bambu-badge-done' };
-    return { t: 'Ledig', c: 'bambu-badge-idle' };
+  // ── Polling-hjelper: én forespørsel om gangen, pause når fanen er skjult ──
+
+  function poller(fn, ms) {
+    let busy = false;
+    const run = async () => {
+      if (busy) return;
+      busy = true;
+      try { await fn(); } finally { busy = false; }
+    };
+    setInterval(() => { if (!document.hidden) run(); }, ms);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) run(); });
+    run();
+    return run;
   }
 
-  function cardCls(p) {
-    if (!p.online) return 'offline';
-    const s = getStatus(p);
-    if (s === 'RUNNING'  || s === 'PRINTING') return 'printing';
-    if (s === 'FAIL'     || s === 'FAILED')   return 'failed';
-    if (s === 'PAUSED'   || s === 'PAUSE')    return 'paused';
-    if (s === 'JUST_DONE')                    return 'just-done';
-    return 'online';
-  }
+  // ════════════════════════════════════════════════════════════════════════
+  //  Dashboard
+  // ════════════════════════════════════════════════════════════════════════
 
-  function sortPrinters(arr) {
-    const o = { printing: 0, failed: 1, paused: 2, 'just-done': 3, online: 4, offline: 5 };
-    return arr.sort((a, b) => (o[cardCls(a)] || 4) - (o[cardCls(b)] || 4));
-  }
+  const CARD_HTML =
+    '<article class="bambu-card bambu-panel bambu-corners">' +
+      '<div class="bambu-card-fill"></div>' +
+      '<div class="bambu-card-alert"></div>' +
+      '<header class="bambu-card-head">' +
+        '<div class="bambu-card-id"><span class="bambu-card-name"></span><span class="bambu-card-model"></span></div>' +
+        '<span class="bambu-chip"><i></i><span class="bambu-chip-text"></span></span>' +
+      '</header>' +
+      '<div class="bambu-card-visual">' +
+        '<img class="bambu-thumb" alt="" decoding="async" hidden />' +
+        '<svg class="bambu-placeholder" viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true">' +
+          '<path d="M32 6 54 18v28L32 58 10 46V18z"/><path d="M10 18l22 12 22-12M32 30v28"/><path d="M21 12l22 12" opacity=".45"/>' +
+        '</svg>' +
+      '</div>' +
+      '<div class="bambu-card-job" hidden></div>' +
+      '<div class="bambu-card-main">' +
+        '<div class="bambu-readout">' +
+          '<span class="bambu-pct"><span class="bambu-pct-num">0</span><small>%</small></span>' +
+          '<span class="bambu-state-msg"></span>' +
+          '<span class="bambu-eta"><span class="bambu-eta-left"></span><span class="bambu-eta-finish"></span></span>' +
+        '</div>' +
+        '<div class="bambu-prog"><div class="bambu-prog-fill"></div><div class="bambu-prog-ticks"></div></div>' +
+      '</div>' +
+      '<footer class="bambu-card-meta">' +
+        '<span class="bambu-meta bambu-m-nozzle" title="Dyse" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 14.76V3.5a2.5 2.5 0 00-5 0v11.26a4.5 4.5 0 105 0z"/></svg><b></b></span>' +
+        '<span class="bambu-meta bambu-m-bed" title="Plate" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="9" width="20" height="6" rx="1.5"/></svg><b></b></span>' +
+        '<span class="bambu-meta bambu-m-layer" title="Lag" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg><b></b></span>' +
+        '<span class="bambu-meta bambu-m-speed" title="Hastighet" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg><b></b></span>' +
+        '<span class="bambu-ams"></span>' +
+      '</footer>' +
+    '</article>';
 
-  // ── Kort-rendering ───────────────────────────────────────────────────────
+  const LABEL   = { printing: 'Printer', paused: 'Pauset', failed: 'Feil', done: 'Ferdig', idle: 'Klar', offline: 'Offline' };
+  const MESSAGE = { paused: 'Pauset', failed: 'Feilet', done: 'Fullført', idle: 'Klar', offline: 'Offline' };
+  const SPEED   = { 1: 'Stille', 2: 'Normal', 3: 'Sport', 4: 'Ludicrous' };
 
-  function renderCard(p) {
-    const badge      = statusBadge(p);
-    const cls        = cardCls(p);
-    const isPrinting = cls === 'printing';
-    const isFailed   = cls === 'failed';
-    const isPaused   = cls === 'paused';
-    const isDone     = cls === 'just-done';
-    const hasJob     = isPrinting || isFailed || isPaused;
-    const progress   = p.progress != null ? parseFloat(p.progress) : null;
+  function initDashboard(wrap) {
+    const fsPage = wrap.closest('.bambu-fs-page');
+    const fit = !!fsPage && wrap.dataset.auto !== 'false';
+    const demo = DEMO_URL || wrap.dataset.demo === 'true';
+    let demoReal = null;  // ekte printerliste (navn) brukt i demo
+    let lastList = [];    // siste printerliste (brukes av demo-"I dag")
+    const cols = Math.max(1, Math.min(8, parseInt(wrap.dataset.cols, 10) || 5));
+    wrap.style.setProperty('--bambu-cols', cols);
 
-    // Zebra-animasjonsrate basert på hastighet
-    const speeds = { 1: '3s', 2: '1.5s', 3: '1.2s', 4: '0.9s' };
-    const zs = speeds[p.spd_lvl] || '1.5s';
+    const cards = new Map();       // printer-id → kort-element
+    const finishedAt = {};         // printer-id → tidspunkt vi så at den ble ferdig
+    const seen = new Set();        // printere vi har sett minst én gang i denne økten
+    let hasData = false;
 
-    let bg = '';
-    if (hasJob && progress != null)
-      bg = '<div class="bambu-progress-bg" style="width:' + progress + '%;animation-duration:' + zs + '"></div>';
-    else if (isDone)
-      bg = '<div class="bambu-progress-bg"></div>';
+    // ── Skjelett (bygges én gang) ──
+    const topbar = h('div', 'bambu-topbar');
+    const chips = h('div', 'bambu-chips');
+    const live = h('span', 'bambu-live');
+    live.title = 'Tilkoblingsstatus';
+    const liveText = h('span', 'bambu-live-text', 'Kobler til…');
+    live.append(h('span', 'bambu-live-dot'), liveText);
+    const right = h('div', 'bambu-topbar-right');
+    right.append(live);
+    const link = linkButton(cfg.dashLinkUrl, cfg.dashLinkLabel);
+    if (link) right.append(link);
+    topbar.append(chips, right);
 
-    const thumb = p.thumbnail
-      ? '<img class="bambu-thumb" src="' + p.thumbnail + '" />'
-      : '';
+    const banner = h('div', 'bambu-banner');
+    banner.hidden = true;
+    banner.setAttribute('role', 'status');
+    const bannerText = h('span');
+    banner.append(fromHTML(ICON.warn), bannerText);
 
-    let body = '';
-    if (hasJob && p.task_name)
-      body += '<div class="bambu-job-name"><span>Fil: </span>' + p.task_name + '</div>';
+    const grid = h('div', 'bambu-grid');
+    const empty = h('div', 'bambu-empty', 'Laster printere…');
 
-    if (isFailed)
-      body += '<div class="bambu-idle" style="color:var(--bambu-red);font-style:normal;font-weight:600">Printing feilet!</div>';
-    if (isPaused)
-      body += '<div class="bambu-idle" style="color:#f39c12;font-style:normal;font-weight:600">Printing pauset</div>';
+    const today = h('section', 'bambu-today');
+    today.hidden = true;
+    const todayVals = {};
+    const todayLabel = h('div', 'bambu-today-item');
+    todayLabel.append(h('span', 'bambu-eyebrow bambu-today-label', 'I dag'));
+    today.append(todayLabel);
+    [['prints', 'prints'], ['weight', 'filament'], ['length', 'lengde'], ['time', 'printtid']].forEach(([key, label]) => {
+      const item = h('div', 'bambu-today-item');
+      todayVals[key] = h('b', null, '–');
+      item.append(todayVals[key], h('span', 'bambu-eyebrow', label));
+      today.append(item);
+    });
 
-    if ((isPrinting || isPaused) && progress != null) {
-      body += '<div class="bambu-pct">' + Math.round(progress) + '%</div>';
-      const ts = formatTime(p.time_remaining);
-      const fs = estimatedFinish(p.time_remaining);
-      if (ts || fs) {
-        body += '<div class="bambu-time">'
-          + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
-        if (ts) body += ts + ' gjenstår';
-        if (ts && fs) body += ' — ';
-        if (fs) body += '<span class="bambu-time-finish">Ferdig ' + fs + '</span>';
-        body += '</div>';
+    wrap.replaceChildren(topbar, banner, grid, empty, today);
+    wrap.classList.toggle('bambu-fit', fit);
+
+    // I fullskjerm-malen flyttes chips, live-status og lenke opp i headeren.
+    if (fsPage) {
+      const statsSlot = $('#bambu-fs-stats', fsPage);
+      const liveSlot = $('#bambu-fs-live', fsPage);
+      if (statsSlot && liveSlot) {
+        statsSlot.append(chips);
+        liveSlot.append(live);
+        if (link) liveSlot.append(link);
+        wrap.classList.add('is-moved-topbar');
       }
-    } else if (isFailed && progress != null) {
-      body += '<div class="bambu-pct" style="color:var(--bambu-red)">Stoppet ' + Math.round(progress) + '%</div>';
-    } else if (isDone) {
-      body += '<div class="bambu-idle" style="color:var(--bambu-green);font-style:normal;font-weight:700">Print fullført!</div>';
-    } else if (!p.online) {
-      body += '<div class="bambu-idle">Printeren er ikke tilgjengelig.</div>';
-    } else {
-      body += '<div class="bambu-idle">Ingen aktiv jobb.</div>';
     }
 
-    // ── Info-rad (temp, lag, hastighet, AMS) ──
-    let info = [];
-
-    if (p.nozzle_temp != null)
-      info.push('<span class="bambu-info-item">'
-        + '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 14.76V3.5a2.5 2.5 0 00-5 0v11.26a4.5 4.5 0 105 0z"/></svg>'
-        + Math.round(p.nozzle_temp) + '°C</span>');
-
-    if (p.bed_temp != null)
-      info.push('<span class="bambu-info-item">'
-        + '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"/></svg>'
-        + 'Plate ' + Math.round(p.bed_temp) + '°C</span>');
-
-    if (p.layer != null && p.total_layers > 0)
-      info.push('<span class="bambu-info-item">'
-        + '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>'
-        + 'Lag ' + p.layer + '/' + p.total_layers + '</span>');
-
-    const sl = speedLabel(p.spd_lvl);
-    if (sl)
-      info.push('<span class="bambu-info-item">'
-        + '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>'
-        + sl + '</span>');
-
-    if (p.ams_colors && p.ams_colors.length > 0) {
-      const dots = p.ams_colors.map(c =>
-        '<span class="bambu-ams-dot" style="background:' + c.color + '" title="' + c.type + ' ' + c.color + '"></span>'
-      ).join(' ');
-      info.push('<span class="bambu-info-item">' + dots + '</span>');
+    function showBanner(kind, text) {
+      banner.classList.toggle('is-warn', kind === 'warn');
+      setText(bannerText, text || '');
+      if (banner.hidden !== !kind) {
+        setHidden(banner, !kind);
+        layoutFit();  // banneret tar plass – regn ut kortstørrelsen på nytt
+      }
     }
 
-    if (info.length > 0 && (hasJob || p.online))
-      body += '<div class="bambu-info">' + info.join('') + '</div>';
+    function setLive(kind, text) {
+      live.classList.toggle('is-live', kind === 'live');
+      live.classList.toggle('is-error', kind === 'error');
+      setText(liveText, text);
+    }
 
-    return '<div class="bambu-card ' + cls + '">' + bg
-      + '<div class="bambu-card-header">'
-      + '<div><div class="bambu-card-name">' + p.name + '</div>'
-      + '<div class="bambu-card-model">' + p.model + '</div></div>'
-      + '<span class="bambu-badge ' + badge.c + '">' + badge.t + '</span>'
-      + '</div>'
-      + '<div class="bambu-card-body">' + thumb + body + '</div>'
-      + '</div>';
-  }
+    // ── Status ──
+    function stateOf(p) {
+      if (!p.online) return 'offline';
+      const s = String(p.print_status || '').toUpperCase();
+      if (s === 'SUCCESS' || s === 'FINISH') {
+        if (!(p.id in finishedAt)) {
+          // Var den allerede ferdig første gang vi så den, er den ikke "nettopp ferdig".
+          finishedAt[p.id] = seen.has(p.id) ? Date.now() : 0;
+        }
+        return Date.now() - finishedAt[p.id] < 120000 ? 'done' : 'idle';
+      }
+      delete finishedAt[p.id];
+      if (s === 'RUNNING' || s === 'PRINTING' || s === 'PREPARE') return 'printing';
+      if (s === 'PAUSED' || s === 'PAUSE') return 'paused';
+      if (s === 'FAIL' || s === 'FAILED') return 'failed';
+      return 'idle';
+    }
 
-  // ── Dashboard ────────────────────────────────────────────────────────────
+    // ── Kort ──
+    function createCard(id) {
+      const el = fromHTML(CARD_HTML);
+      el.dataset.dev = id;
+      const q = s => el.querySelector(s);
+      el._r = {
+        fill: q('.bambu-card-fill'), name: q('.bambu-card-name'), model: q('.bambu-card-model'),
+        chip: q('.bambu-chip-text'), thumb: q('.bambu-thumb'), job: q('.bambu-card-job'),
+        pct: q('.bambu-pct'), pctNum: q('.bambu-pct-num'), msg: q('.bambu-state-msg'),
+        eta: q('.bambu-eta'), etaLeft: q('.bambu-eta-left'), etaFinish: q('.bambu-eta-finish'),
+        prog: q('.bambu-prog'), progFill: q('.bambu-prog-fill'),
+        nozzle: q('.bambu-m-nozzle'), bed: q('.bambu-m-bed'), layer: q('.bambu-m-layer'), speed: q('.bambu-m-speed'),
+        ams: q('.bambu-ams'), thumbKey: null, amsSig: null,
+      };
+      return el;
+    }
 
-  function initDashboard(el, linkUrl, linkLabel) {
-    const cols = el.dataset.cols || '5';
-    const relink = () => injectLinkButton(el, linkUrl, linkLabel);
-    initTheme(el);
+    // Bytt bare bilde når selve filen er en annen, og forhåndslast før bytte
+    // så det aldri vises en tom boks.
+    function setThumb(card, rawUrl) {
+      const r = card._r;
+      // data:-bilder er trygge i <img> (brukes av demomodus)
+      const href = /^data:image\/(svg\+xml|png|jpeg);base64,/.test(rawUrl || '') ? rawUrl : safeUrl(rawUrl);
+      const key = href ? thumbKey(href) : '';
+      if (key === r.thumbKey) return;
+      r.thumbKey = key;
+      if (!href) {
+        r.thumb.hidden = true;
+        card.classList.remove('has-thumb');
+        r.thumb.removeAttribute('src');
+        return;
+      }
+      const pre = new Image();
+      pre.onload = () => {
+        if (r.thumbKey !== key) return;
+        r.thumb.src = href;
+        r.thumb.hidden = false;
+        card.classList.add('has-thumb');
+      };
+      pre.onerror = () => { if (r.thumbKey === key) r.thumbKey = null; };  // prøv igjen neste runde
+      pre.src = href;
+    }
+
+    function setMeta(el, show, text) {
+      setHidden(el, !show);
+      if (show) setText(el.querySelector('b'), text);
+    }
+
+    function updateCard(card, p, state) {
+      const r = card._r;
+      const hasJob = state === 'printing' || state === 'paused' || state === 'failed';
+      const pv = parseFloat(p.progress);
+      const progress = p.progress != null && !isNaN(pv) ? Math.max(0, Math.min(100, pv)) : null;
+
+      if (card.dataset.state !== state) card.dataset.state = state;
+      card.classList.toggle('has-job', hasJob && progress != null);
+
+      setText(r.name, p.name || p.id);
+      setText(r.model, p.model && p.model !== 'Ukjent' ? p.model : '');
+      setText(r.chip, LABEL[state]);
+
+      setThumb(card, p.thumbnail || '');
+
+      const job = hasJob && p.task_name ? String(p.task_name) : '';
+      setText(r.job, job);
+      setHidden(r.job, !job);
+      if (job) r.job.title = job;
+
+      // Fremdrift
+      const showPct = hasJob && progress != null;
+      setHidden(r.pct, !showPct);
+      if (showPct) setText(r.pctNum, Math.round(progress));
+
+      setHidden(r.msg, state === 'printing' && showPct);
+      setText(r.msg, state === 'printing' ? 'Printer' : (MESSAGE[state] || ''));
+
+      const left = state === 'printing' ? formatLeft(p.time_remaining) : '';
+      const fin  = state === 'printing' ? finishClock(p.time_remaining) : '';
+      setHidden(r.eta, !(left || fin));
+      setText(r.etaLeft, left);
+      setText(r.etaFinish, fin ? 'ferdig ' + fin : '');
+
+      const barValue = state === 'done' ? 1 : (showPct ? progress / 100 : 0);
+      setHidden(r.prog, !(showPct || state === 'done'));
+      setTransform(r.progFill, 'scaleX(' + barValue + ')');
+      setTransform(r.fill, 'scaleX(' + (showPct ? progress / 100 : 0) + ')');
+
+      // Meta-linje (temperatur/lag/AMS er som regel null i PHP-versjonen → skjules)
+      const online = !!p.online;
+      setMeta(r.nozzle, online && p.nozzle_temp != null && isFinite(p.nozzle_temp), Math.round(num(p.nozzle_temp)) + '°');
+      setMeta(r.bed, online && p.bed_temp != null && isFinite(p.bed_temp), Math.round(num(p.bed_temp)) + '°');
+      setMeta(r.layer, hasJob && p.layer != null && num(p.total_layers) > 0, num(p.layer) + '/' + num(p.total_layers));
+      setMeta(r.speed, state === 'printing' && !!SPEED[p.spd_lvl], SPEED[p.spd_lvl] || '');
+
+      const colors = (online && Array.isArray(p.ams_colors))
+        ? p.ams_colors.filter(c => c && /^#[0-9a-f]{6}$/i.test(c.color || ''))
+        : [];
+      const amsSig = colors.map(c => c.color + (c.type || '')).join('|');
+      if (amsSig !== r.amsSig) {
+        r.amsSig = amsSig;
+        r.ams.replaceChildren(...colors.map(c => {
+          const s = document.createElement('span');
+          s.style.background = c.color;
+          s.title = (String(c.type || '') + ' ' + c.color).trim();
+          return s;
+        }));
+      }
+    }
+
+    function updateChips(states, printers) {
+      const count = s => states.filter(x => x === s).length;
+      const items = [
+        ['Totalt', printers.length, ''],
+        ['Online', printers.filter(p => p.online).length, ''],
+        ['Printer', count('printing'), 'is-orange'],
+      ];
+      const failed = count('failed');
+      if (failed) items.push(['Feil', failed, 'is-red']);
+      const sig = JSON.stringify(items);
+      if (chips.dataset.sig === sig) return;
+      chips.dataset.sig = sig;
+      chips.replaceChildren(...items.map(([label, val, cls]) => {
+        const el = h('span', 'bambu-hud-stat ' + cls);
+        el.append(h('b', null, val), ' ' + label);
+        return el;
+      }));
+    }
+
+    function render(printers) {
+      const list = printers.filter(p => p && p.id != null).map(p => ({ p, id: String(p.id), state: stateOf(p) }));
+      // Fast rekkefølge etter navn (Mini 2 før Mini 10), så kortene ikke hopper når status endres
+      list.sort((a, b) => collator.compare(String(a.p.name || a.id), String(b.p.name || b.id)));
+
+      const ids = new Set();
+      list.forEach((e, i) => {
+        ids.add(e.id);
+        let card = cards.get(e.id);
+        if (!card) { card = createCard(e.id); cards.set(e.id, card); }
+        updateCard(card, e.p, e.state);
+        if (grid.children[i] !== card) grid.insertBefore(card, grid.children[i] || null);
+      });
+      cards.forEach((card, id) => { if (!ids.has(id)) { card.remove(); cards.delete(id); } });
+      list.forEach(e => seen.add(e.p.id));
+
+      updateChips(list.map(e => e.state), list.map(e => e.p));
+      setText(empty, list.length ? '' : 'Ingen printere funnet.');
+      setHidden(empty, list.length > 0);
+      layoutFit();
+    }
 
     async function refresh() {
       try {
-        const res  = await fetch(REST + '/status');
-        const data = await res.json();
-
-        if (data.needs_verify_code) {
-          el.innerHTML = '<div class="bambu-loading">Venter på verifisering – sjekk WordPress-innstillinger.</div>';
-          relink(); return;
+        let data;
+        if (demo) {
+          if (demoReal === null) {
+            try { const r = await fetchJSON('/status'); demoReal = Array.isArray(r.printers) ? r.printers : []; }
+            catch (e) { demoReal = []; }
+          }
+          data = { printers: demoPrinters(demoReal), error: null, needs_verify_code: false };
+        } else {
+          data = await fetchJSON('/status');
         }
 
-        const sorted   = sortPrinters(data.printers || []);
-        const total    = sorted.length;
-        const online   = sorted.filter(p => p.online).length;
-        const printing = sorted.filter(p => { const s = getStatus(p); return s === 'RUNNING' || s === 'PRINTING'; }).length;
-        const failed   = sorted.filter(p => { const s = getStatus(p); return s === 'FAIL' || s === 'FAILED'; }).length;
+        if (data.needs_verify_code) {
+          showBanner('warn', 'Venter på verifiseringskode fra Bambu Lab. En administrator må skrive inn koden under Innstillinger → Bambu Dashboard i WordPress.');
+          setLive('error', 'Venter på kode');
+          if (!hasData) setText(empty, 'Venter på verifisering…');
+          return;
+        }
 
-        let html = '<div class="bambu-summary">'
-          + '<div class="bambu-stat"><span class="bambu-stat-label">Totalt</span><span class="bambu-stat-value">' + total + '</span></div>'
-          + '<div class="bambu-stat"><span class="bambu-stat-label">Online</span><span class="bambu-stat-value">' + online + '</span></div>'
-          + '<div class="bambu-stat"><span class="bambu-stat-label">Printer</span><span class="bambu-stat-value orange">' + printing + '</span></div>';
-        if (failed > 0)
-          html += '<div class="bambu-stat"><span class="bambu-stat-label">Feil</span><span class="bambu-stat-value red">' + failed + '</span></div>';
-        html += '</div>';
+        const printers = Array.isArray(data.printers) ? data.printers : null;
+        if (data.error && (!printers || !printers.length)) {
+          // Behold siste gode data, vis bare feilen.
+          showBanner('error', 'Feil fra Bambu Cloud: ' + String(data.error));
+          setLive('error', 'Feil');
+          if (!hasData) setText(empty, 'Ingen data ennå – prøver igjen…');
+          return;
+        }
 
-        html += '<div class="bambu-grid cols-' + cols + '">' + sorted.map(renderCard).join('') + '</div>';
-        html += '<div class="bambu-today" id="bambu-today"></div>';
-        el.innerHTML = html;
-        relink();
-
-        refreshToday();
+        showBanner(data.error ? 'error' : null, data.error ? 'Feil fra Bambu Cloud: ' + String(data.error) : '');
+        hasData = true;
+        lastList = printers || [];
+        render(lastList);
+        if (demo) {
+          showBanner('warn', 'Demomodus – printdataene er oppdiktet.');
+          setLive('live', 'Demo · ' + hhmm(new Date()));
+        } else {
+          setLive('live', 'Oppdatert ' + hhmm(new Date()));
+        }
       } catch (e) {
-        el.innerHTML = '<div class="bambu-loading">Kunne ikke koble til – prøver igjen...</div>';
-        relink();
+        console.warn('[bambu] Kunne ikke hente status:', e);
+        showBanner('error', e && e.status
+          ? 'Serverfeil (HTTP ' + e.status + '): ' + e.message + ' – prøver igjen om litt.'
+          : 'Ingen kontakt med serveren – prøver igjen om litt.');
+        setLive('error', 'Frakoblet');
+        if (!hasData) setText(empty, 'Kunne ikke koble til – prøver igjen…');
       }
     }
 
     async function refreshToday() {
       try {
-        const res = await fetch(REST + '/today');
-        const d   = await res.json();
-        const bar = document.getElementById('bambu-today');
-        if (!bar) return;
-        bar.innerHTML =
-          '<div class="bambu-today-item"><span class="bambu-today-label">I dag</span></div>'
-          + '<div class="bambu-today-item"><span class="bambu-today-value">' + d.prints + '</span><span class="bambu-today-label">prints</span></div>'
-          + '<div class="bambu-today-item"><span class="bambu-today-value">' + Math.round(d.weight_g) + 'g</span><span class="bambu-today-label">filament</span></div>'
-          + '<div class="bambu-today-item"><span class="bambu-today-value">' + formatMeters(d.length_cm ?? 0) + '</span><span class="bambu-today-label">lengde</span></div>';
-      } catch (e) {}
+        const d = demo ? demoToday(lastList) : await fetchJSON('/today');
+        if (d.error) return;  // behold gamle tall
+        setText(todayVals.prints, formatInt(d.prints));
+        setText(todayVals.weight, formatWeight(d.weight_g));
+        setText(todayVals.length, formatLength(d.length_cm));
+        setText(todayVals.time, formatDuration(d.time_s));
+        if (today.hidden) { today.hidden = false; layoutFit(); }
+      } catch (e) { /* behold gamle tall */ }
     }
 
-    refresh();
-    setInterval(refresh, 30000);
-    setInterval(refreshToday, 60000);
+    // ── Tilpass-til-skjerm: finn kolonner/rader som gir størst mulige kort ──
+    function layoutFit() {
+      if (!fit) return;
+      const n = cards.size;
+      if (!n) return;
+      const gap = parseFloat(getComputedStyle(grid).columnGap) || 12;
+      const W = grid.clientWidth, H = grid.clientHeight;
+      const ratio = 0.82;  // ønsket bredde/høyde for et kort
+      let best = null;
+      for (let c = 1; c <= n; c++) {
+        const rows = Math.ceil(n / c);
+        const w = (W - gap * (c - 1)) / c;
+        const hh = (H - gap * (rows - 1)) / rows;
+        if (w <= 0 || hh <= 0) continue;
+        const cw = Math.min(w, hh * ratio * 1.35);   // tillat litt bredere kort enn idealet
+        const score = Math.min(cw, hh * ratio);
+        if (!best || score > best.score) best = { score, w: cw, h: hh };
+      }
+      if (!best) return;
+      grid.style.setProperty('--bambu-card-w', Math.floor(best.w) + 'px');
+      grid.style.setProperty('--bambu-card-h', Math.floor(best.h) + 'px');
+    }
+
+    if (fit) {
+      let resizeTimer;
+      window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(layoutFit, 120); });
+      document.addEventListener('fullscreenchange', () => requestAnimationFrame(layoutFit));
+    }
+
+    poller(refresh, demo ? 3000 : POLL_STATUS_MS);
+    poller(refreshToday, demo ? 3000 : POLL_TODAY_MS);
   }
 
-  // ── Statistikk ───────────────────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════════
+  //  Statistikk
+  // ════════════════════════════════════════════════════════════════════════
 
-  function initStats(el, linkUrl, linkLabel) {
-    const relink = () => injectLinkButton(el, linkUrl, linkLabel);
-    initTheme(el);
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const MONTHS = ['jan', 'feb', 'mar', 'apr', 'mai', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'des'];
 
-    let allDevs = [];
-    let sortKey = 'total_prints';
-    let sortDir = -1; // -1 = desc, 1 = asc
-    let currentTab = 'stats';
-    let exportBtnHtml = '';
+  const rate = d => num(d.total_prints) > 0 ? Math.round(num(d.successful) / num(d.total_prints) * 100) : 0;
 
-    const sortDefs = [
-      { key: 'name',           label: 'Navn',    dir: 1  },
-      { key: 'total_prints',   label: 'Prints',  dir: -1 },
-      { key: 'total_time_s',   label: 'Tid',     dir: -1 },
-      { key: 'total_weight_g', label: 'Filament',dir: -1 },
-      { key: '_meters',        label: 'Lengde',  dir: -1 },
-    ];
+  const SORTS = [
+    { key: 'total_prints',    label: 'Prints',   dir: -1, get: d => num(d.total_prints) },
+    { key: 'rate',            label: 'Suksess',  dir: -1, get: rate },
+    { key: 'total_time_s',    label: 'Tid',      dir: -1, get: d => num(d.total_time_s) },
+    { key: 'total_weight_g',  label: 'Filament', dir: -1, get: d => num(d.total_weight_g) },
+    { key: 'total_length_cm', label: 'Lengde',   dir: -1, get: d => num(d.total_length_cm) },
+    { key: 'name',            label: 'Navn',     dir: 1,  get: d => String(d.name || '') },
+  ];
 
-    function getSortValue(d, key) {
-      if (key === '_meters') return d.total_length_cm ?? 0;
-      return d[key] ?? 0;
+  // Tidspunkt fra API-et er UTC. Bruk unix-sekunder når de finnes.
+  function parseUtc(ts, str) {
+    const n = Number(ts);
+    if (ts != null && isFinite(n) && n > 0) return new Date(n * 1000);
+    if (!str || typeof str !== 'string') return null;
+    const p = str.split(/[- :T]/).map(Number);
+    if (p.length < 3 || p.slice(0, 3).some(isNaN)) return null;
+    return new Date(Date.UTC(p[0], p[1] - 1, p[2], p[3] || 0, p[4] || 0, p[5] || 0));
+  }
+  function formatHistDate(d) {
+    if (!d) return '–';
+    const year = d.getFullYear() !== new Date().getFullYear() ? ' ' + d.getFullYear() : '';
+    return d.getDate() + '. ' + MONTHS[d.getMonth()] + year + ' ' + hhmm(d);
+  }
+
+  function ring(pct, hasPrints) {
+    const r = 26, c = 2 * Math.PI * r;
+    const box = h('div', 'bambu-ring');
+    box.title = 'Suksessrate';
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 64 64');
+    const track = document.createElementNS(SVG_NS, 'circle');
+    track.setAttribute('class', 'bambu-ring-track' + (hasPrints ? '' : ' is-empty'));
+    const val = document.createElementNS(SVG_NS, 'circle');
+    val.setAttribute('class', 'bambu-ring-val');
+    [track, val].forEach(el => { el.setAttribute('cx', '32'); el.setAttribute('cy', '32'); el.setAttribute('r', String(r)); });
+    val.setAttribute('stroke-dasharray', String(c));
+    val.setAttribute('stroke-dashoffset', String(c * (1 - pct / 100)));
+    if (!pct) val.setAttribute('hidden', '');
+    svg.append(track, val);
+    box.append(svg, h('span', null, hasPrints ? pct + '%' : '–'));
+    return box;
+  }
+
+  function initStats(wrap) {
+    let devices = [];
+    let sortKey = 'name';
+    let sortDir = 1;
+    let histLoaded = false;
+    let histToken = 0;
+    let histPage = 1;
+
+    // ── Skjelett ──
+    const head = h('div', 'bambu-stats-head');
+    const title = h('div', 'bambu-title');
+    title.append('Print', h('span', null, '//'), 'logg');
+    const headRight = h('div', 'bambu-head-right');
+    const sync = h('span', 'bambu-sync');
+    headRight.append(sync);
+    const link = linkButton(cfg.statsLinkUrl, cfg.statsLinkLabel);
+    // I fullskjerm-malen ligger lenken i headeren, samme sted som på dashboardet
+    const fsLiveSlot = $('#bambu-fs-live', wrap.closest('.bambu-fs-page') || document.createElement('div'));
+    if (link) (fsLiveSlot || headRight).append(link);
+    head.append(title, headRight);
+
+    const ind = h('div', 'bambu-refresh-ind');
+    const errBanner = h('div', 'bambu-banner');
+    const errText = h('span');
+    errBanner.append(fromHTML(ICON.warn), errText);
+    errBanner.hidden = true;
+    const warnBanner = h('div', 'bambu-banner is-warn');
+    const warnText = h('span');
+    warnBanner.append(fromHTML(ICON.warn), warnText);
+    warnBanner.hidden = true;
+
+    const loading = h('div', 'bambu-loading', 'Henter statistikk…');
+    const content = h('div', 'bambu-stats-content');
+    content.hidden = true;
+
+    const kpis = h('div', 'bambu-kpis');
+
+    const tabs = h('div', 'bambu-tabs');
+    const tabGroup = h('div', 'bambu-tab-group');
+    tabGroup.setAttribute('role', 'tablist');
+    const tabBtns = {};
+    [['stats', 'Per printer'], ['history', 'Alle prints']].forEach(([key, label]) => {
+      const b = h('button', 'bambu-tab-btn', label);
+      b.type = 'button';
+      b.setAttribute('role', 'tab');
+      b.addEventListener('click', () => showTab(key));
+      tabBtns[key] = b;
+      tabGroup.append(b);
+    });
+    const exportBtn = h('a', 'bambu-sort-btn bambu-export-btn');
+    exportBtn.href = apiUrl('/export');
+    exportBtn.setAttribute('download', '');
+    exportBtn.append(fromHTML(ICON.download), ' Last ned CSV');
+    tabs.append(tabGroup, exportBtn);
+
+    // Fane: per printer
+    const statsTab = h('div', 'bambu-tab-stats');
+    const toolbar = h('div', 'bambu-toolbar');
+    toolbar.append(h('span', 'bambu-eyebrow', 'Sorter'));
+    const sortBtns = SORTS.map(s => {
+      const b = h('button', 'bambu-sort-btn');
+      b.type = 'button';
+      b.dataset.key = s.key;
+      b.addEventListener('click', () => {
+        if (sortKey === s.key) sortDir *= -1;
+        else { sortKey = s.key; sortDir = s.dir; }
+        renderGrid();
+      });
+      toolbar.append(b);
+      return b;
+    });
+    const pgrid = h('div', 'bambu-pgrid');
+    statsTab.append(toolbar, pgrid);
+
+    // Fane: alle prints
+    const histTab = h('div', 'bambu-hist');
+    histTab.hidden = true;
+    const histMsg = h('div', 'bambu-loading', 'Laster historikk…');
+    const tableWrap = h('div', 'bambu-table-wrap bambu-panel');
+    tableWrap.hidden = true;
+    const table = h('table', 'bambu-hist-table');
+    const thead = h('thead');
+    const htr = h('tr');
+    [['Dato', ''], ['Printer', ''], ['Tittel', ''], ['Status', ''], ['Tid', 'is-num'], ['Filament', 'is-num']].forEach(([t, c]) => htr.append(h('th', c, t)));
+    thead.append(htr);
+    const tbody = h('tbody');
+    table.append(thead, tbody);
+    tableWrap.append(table);
+    const pager = h('div', 'bambu-pager');
+    const prevBtn = h('button', 'bambu-sort-btn', '← Forrige');
+    const nextBtn = h('button', 'bambu-sort-btn', 'Neste →');
+    prevBtn.type = nextBtn.type = 'button';
+    const pageNum = h('span', 'bambu-pagenum');
+    const histTotal = h('span', 'bambu-hist-total');
+    pager.append(prevBtn, pageNum, nextBtn, histTotal);
+    pager.hidden = true;
+    prevBtn.addEventListener('click', () => loadHistory(histPage - 1));
+    nextBtn.addEventListener('click', () => loadHistory(histPage + 1));
+    histTab.append(histMsg, tableWrap, pager);
+
+    content.append(warnBanner, kpis, tabs, statsTab, histTab);
+    wrap.replaceChildren(head, ind, errBanner, loading, content);
+
+    function showError(text) {
+      setText(errText, text || '');
+      setHidden(errBanner, !text);
     }
 
-    function renderSortBar() {
-      let html = '';
-      sortDefs.forEach(s => {
-        const active = sortKey === s.key;
-        const arrow  = active ? (sortDir === -1 ? ' ↓' : ' ↑') : '';
-        html += '<button class="bambu-sort-btn' + (active ? ' active' : '') + '" data-key="' + s.key + '">'
-              + s.label + arrow + '</button>';
+    function showTab(key) {
+      Object.keys(tabBtns).forEach(k => {
+        tabBtns[k].classList.toggle('active', k === key);
+        tabBtns[k].setAttribute('aria-selected', k === key ? 'true' : 'false');
       });
-      return html;
+      setHidden(statsTab, key !== 'stats');
+      setHidden(histTab, key !== 'history');
+      if (key === 'history' && !histLoaded) loadHistory(1);
+    }
+
+    // ── KPI-er ──
+    function kpi(label, value, color) {
+      const el = h('div', 'bambu-kpi bambu-panel');
+      if (color) el.dataset.k = color;
+      el.append(h('span', 'bambu-eyebrow', label), h('b', null, value));
+      return el;
+    }
+
+    function renderKpis() {
+      const t = devices.reduce((a, d) => ({
+        prints: a.prints + num(d.total_prints), ok: a.ok + num(d.successful), fail: a.fail + num(d.failed),
+        time: a.time + num(d.total_time_s), weight: a.weight + num(d.total_weight_g), length: a.length + num(d.total_length_cm),
+      }), { prints: 0, ok: 0, fail: 0, time: 0, weight: 0, length: 0 });
+      kpis.replaceChildren(
+        kpi('Totalt prints', formatInt(t.prints), 'orange'),
+        kpi('Vellykket', formatInt(t.ok), 'green'),
+        kpi('Feilet / avbrutt', formatInt(t.fail), 'red'),
+        kpi('Suksessrate', (t.prints ? Math.round(t.ok / t.prints * 100) : 0) + '%', 'cyan'),
+        kpi('Total printtid', formatDuration(t.time)),
+        kpi('Filament', formatWeight(t.weight)),
+        kpi('Lengde', formatLength(t.length))
+      );
+    }
+
+    // ── Printerkort ──
+    function pstat(label, value, hl) {
+      const el = h('div', 'bambu-pstat' + (hl ? ' is-hl' : ''));
+      el.append(h('b', null, value), h('span', 'bambu-eyebrow', label));
+      return el;
+    }
+
+    function pcard(d) {
+      const card = h('article', 'bambu-pcard bambu-panel bambu-corners');
+      const head = h('div', 'bambu-pcard-head');
+      const t = h('div', 'bambu-pcard-title');
+      t.append(h('div', 'bambu-pcard-name', d.name || '–'), h('div', 'bambu-pcard-model', d.model || ''));
+      head.append(t, ring(rate(d), num(d.total_prints) > 0));
+      const stats = h('div', 'bambu-pstats');
+      stats.append(
+        pstat('Prints', formatInt(d.total_prints), true),
+        pstat('Tid', formatDuration(d.total_time_s)),
+        pstat('Filament', formatWeight(d.total_weight_g)),
+        pstat('Lengde', formatLength(d.total_length_cm))
+      );
+      const okfail = h('div', 'bambu-okfail');
+      okfail.append(
+        h('span', 'is-ok', '▲ ' + formatInt(d.successful) + ' vellykket'),
+        h('span', 'is-fail', formatInt(d.failed) + ' feilet ▼')
+      );
+      card.append(head, stats, okfail);
+      return card;
     }
 
     function renderGrid() {
-      const sorted = [...allDevs].sort((a, b) => {
-        // Navn: naturlig sortering (Mini 2 < Mini 10 < Mini 11)
-        if (sortKey === 'name') {
-          return sortDir * a.name.localeCompare(b.name, 'no', { numeric: true, sensitivity: 'base' });
-        }
-        const av = getSortValue(a, sortKey);
-        const bv = getSortValue(b, sortKey);
-        if (av < bv) return sortDir;
-        if (av > bv) return -sortDir;
-        return 0;
+      const s = SORTS.find(x => x.key === sortKey) || SORTS[0];
+      // Printere som er fjernet fra kontoen telles i totalene, men får ikke eget kort
+      const sorted = devices.filter(d => !d.removed).sort((a, b) => {
+        if (s.key === 'name') return sortDir * collator.compare(s.get(a), s.get(b));
+        return sortDir * (s.get(a) - s.get(b)) || collator.compare(String(a.name || ''), String(b.name || ''));
       });
-
-      let html = '<div class="bambu-stats-grid">';
-      sorted.forEach(d => {
-        const r = d.total_prints > 0 ? Math.round(d.successful / d.total_prints * 100) : 0;
-        html += '<div class="bambu-stats-card">'
-          + '<div class="bambu-stats-card-header"><div class="bambu-stats-card-name">' + d.name + '</div>'
-          + '<div class="bambu-stats-card-model">' + d.model + '</div></div>'
-          + '<div class="bambu-stats-card-body"><div class="bambu-stats-grid-inner">'
-          + statsItem('Prints',   String(d.total_prints), 'color:var(--bambu-orange)')
-          + statsItem('Printtid', formatDuration(d.total_time_s))
-          + statsItem('Filament', formatWeight(d.total_weight_g))
-          + statsItem('Lengde',   formatMeters(d.total_length_cm ?? 0))
-          + '</div>'
-          + '<div class="bambu-rate-bar"><div class="bambu-rate-fill" style="width:' + r + '%"></div></div>'
-          + '<div class="bambu-rate-nums"><span>' + d.successful + ' vellykket</span><span>' + r + '%</span><span>' + d.failed + ' feilet</span></div>'
-          + '</div></div>';
-      });
-      html += '</div>';
-      return html;
-    }
-
-    function render() {
-      const grid = el.querySelector('.bambu-stats-grid-wrap');
-      if (grid) grid.innerHTML = renderGrid();
-      el.querySelectorAll('.bambu-sort-btn[data-key]').forEach(btn => {
-        const active = btn.dataset.key === sortKey;
-        btn.classList.toggle('active', active);
-        if (active) {
-          btn.textContent = sortDefs.find(s => s.key === sortKey).label + (sortDir === -1 ? ' ↓' : ' ↑');
-        } else {
-          btn.textContent = sortDefs.find(s => s.key === btn.dataset.key).label;
-        }
+      pgrid.replaceChildren(...sorted.map(pcard));
+      if (!sorted.length) pgrid.append(h('div', 'bambu-empty', 'Ingen printere funnet.'));
+      sortBtns.forEach((b, i) => {
+        const def = SORTS[i];
+        const active = def.key === sortKey;
+        b.classList.toggle('active', active);
+        b.replaceChildren(def.label);
+        if (active) b.append(' ', h('span', 'bambu-sort-arrow', sortDir === -1 ? '↓' : '↑'));
       });
     }
 
-    function renderTabs() {
-      return '<div class="bambu-tabs">'
-        + '<button class="bambu-tab-btn' + (currentTab === 'stats' ? ' active' : '') + '" data-tab="stats">Per printer</button>'
-        + '<button class="bambu-tab-btn' + (currentTab === 'history' ? ' active' : '') + '" data-tab="history">Alle prints</button>'
-        + '</div>';
-    }
-
-    function buildStatsBody() {
-      return '<div class="bambu-sort-bar">' + renderSortBar() + exportBtnHtml + '</div>'
-        + '<div class="bambu-stats-grid-wrap">' + renderGrid() + '</div>';
-    }
-
-    function bindSortBtns() {
-      el.querySelectorAll('.bambu-sort-btn[data-key]').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const key = btn.dataset.key;
-          if (sortKey === key) sortDir *= -1;
-          else { sortKey = key; sortDir = sortDefs.find(s => s.key === key).dir; }
-          render();
-        });
-      });
-    }
-
-    function switchTab() {
-      el.querySelectorAll('.bambu-tab-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.tab === currentTab);
-      });
-      const body = el.querySelector('.bambu-tab-body');
-      if (!body) return;
-      if (currentTab === 'stats') {
-        body.innerHTML = buildStatsBody();
-        bindSortBtns();
+    function renderAll(data) {
+      devices = Array.isArray(data.devices) ? data.devices.filter(d => d && typeof d === 'object') : [];
+      renderKpis();
+      renderGrid();
+      if (data.data_complete === true) {
+        warnBanner.hidden = true;
       } else {
-        body.innerHTML = '<div class="bambu-history-wrap"><div class="bambu-loading">Laster historikk...</div></div>';
-        loadHistory(1);
+        const apiTotal = num(data.api_total);
+        setText(warnText, 'Historikken lastes fortsatt inn – tallene er ikke komplette ennå. Last inn siden på nytt om litt.' +
+          (apiTotal > 0 ? ' (Bambu rapporterer ' + formatInt(apiTotal) + ' prints totalt.)' : ''));
+        warnBanner.hidden = false;
       }
+      const at = num(data._fetched_at);
+      setText(sync, at ? 'Oppdatert ' + new Date(at).toLocaleString('nb-NO', { dateStyle: 'short', timeStyle: 'short' }) : '');
+      loading.hidden = true;
+      content.hidden = false;
     }
 
-    function formatHistDate(dt) {
-      if (!dt) return '–';
-      const p = dt.split(/[- :]/);
-      const d = new Date(+p[0], +p[1] - 1, +p[2], +p[3], +p[4]);
-      const mo = ['jan','feb','mar','apr','mai','jun','jul','aug','sep','okt','nov','des'];
-      return d.getDate() + '. ' + mo[d.getMonth()] + ' '
-        + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
-    }
-
-    function parseDt(dt) {
-      if (!dt) return null;
-      const p = dt.split(/[- :]/);
-      return new Date(+p[0], +p[1] - 1, +p[2], +p[3] || 0, +p[4] || 0, +p[5] || 0);
-    }
-
-    function actualDurS(p) {
-      const s = parseDt(p.start_time), e = parseDt(p.end_time);
-      if (s && e && e > s) return Math.round((e - s) / 1000);
-      return p.cost_time_s;
-    }
-
-    function renderHistoryTable(prints) {
-      if (!prints || !prints.length) return '<div class="bambu-loading">Ingen prints funnet.</div>';
-      let html = '<div class="bambu-hist-table-wrap"><table class="bambu-hist-table">'
-        + '<thead><tr><th>Dato</th><th>Printer</th><th>Tittel</th><th>Status</th><th>Tid</th><th>Filament</th></tr></thead><tbody>';
-      prints.forEach(p => {
-        const ok  = p.status === 2;
-        const dur = formatDuration(actualDurS(p));
-        const fil = ok ? formatWeight(p.weight_g) : '–';
-        html += '<tr class="' + (ok ? '' : 'bambu-hist-fail') + '">'
-          + '<td class="bambu-hist-date">' + formatHistDate(p.start_time) + '</td>'
-          + '<td class="bambu-hist-printer">' + p.device_name + '</td>'
-          + '<td class="bambu-hist-title">' + (p.title || '–') + '</td>'
-          + '<td><span class="bambu-badge ' + (ok ? 'bambu-badge-done' : 'bambu-badge-offline') + '">'
-          + (ok ? '✓' : '✗') + '</span></td>'
-          + '<td class="bambu-hist-meta">' + dur + '</td>'
-          + '<td class="bambu-hist-meta">' + fil + '</td>'
-          + '</tr>';
-      });
-      html += '</tbody></table></div>';
-      return html;
-    }
-
-    function renderPagination(page, pages, total) {
-      const tot = '<div class="bambu-hist-total">' + total.toLocaleString('no') + ' prints totalt</div>';
-      if (pages <= 1) return tot;
-      return '<div class="bambu-hist-pager">'
-        + '<button class="bambu-sort-btn" data-page="' + (page - 1) + '"' + (page <= 1 ? ' disabled' : '') + '>← Forrige</button>'
-        + '<span class="bambu-hist-pagenum">Side ' + page + ' av ' + pages + '</span>'
-        + '<button class="bambu-sort-btn" data-page="' + (page + 1) + '"' + (page >= pages ? ' disabled' : '') + '>Neste →</button>'
-        + '</div>' + tot;
+    // ── Historikk ──
+    function histRow(p) {
+      const ok = num(p.status) === 2;
+      const start = parseUtc(p.start_ts, p.start_time);
+      const end = parseUtc(p.end_ts, p.end_time);
+      const dur = (start && end && end > start) ? Math.round((end - start) / 1000) : num(p.cost_time_s);
+      const tr = h('tr', ok ? '' : 'is-fail');
+      const status = h('span', 'bambu-status' + (ok ? '' : ' is-fail'));
+      status.append(h('i'), ok ? 'OK' : 'Feilet');
+      const stTd = h('td', 'bambu-hist-status');
+      stTd.append(status);
+      const titleTd = h('td', 'bambu-hist-title', p.title || '–');
+      if (p.title) titleTd.title = String(p.title);
+      tr.append(
+        h('td', 'bambu-hist-date', formatHistDate(start)),
+        h('td', 'bambu-hist-printer', p.device_name || '–'),
+        titleTd,
+        stTd,
+        h('td', 'bambu-hist-meta', dur > 0 ? formatDuration(dur) : '–'),
+        h('td', 'bambu-hist-meta', ok ? formatWeight(p.weight_g) : '–')
+      );
+      return tr;
     }
 
     async function loadHistory(page) {
-      const wrap = el.querySelector('.bambu-history-wrap');
-      if (!wrap) return;
+      const token = ++histToken;
+      histTab.classList.add('is-loading');
+      prevBtn.disabled = nextBtn.disabled = true;
       try {
-        const res  = await fetch(REST + '/prints?per_page=50&page=' + page);
-        const data = await res.json();
-        wrap.innerHTML = renderHistoryTable(data.prints) + renderPagination(page, data.pages, data.total);
-        wrap.querySelectorAll('button[data-page]').forEach(btn => {
-          btn.addEventListener('click', () => loadHistory(+btn.dataset.page));
-        });
+        const data = await fetchJSON('/prints', { page: Math.max(1, page), per_page: 50 });
+        if (token !== histToken) return;
+        if (data.error) throw new Error(String(data.error));
+        const prints = Array.isArray(data.prints) ? data.prints : [];
+        const pages = Math.max(1, num(data.pages) || 1);
+        histPage = Math.min(Math.max(1, num(data.page) || page), pages);
+        histLoaded = true;
+        tbody.replaceChildren(...prints.map(histRow));
+        setHidden(tableWrap, !prints.length);
+        setText(histMsg, prints.length ? '' : 'Ingen prints funnet.');
+        setHidden(histMsg, prints.length > 0);
+        setText(pageNum, 'Side ' + histPage + ' av ' + pages);
+        setText(histTotal, formatInt(data.total) + ' prints totalt');
+        setHidden(prevBtn, pages <= 1);
+        setHidden(nextBtn, pages <= 1);
+        setHidden(pageNum, pages <= 1);
+        prevBtn.disabled = histPage <= 1;
+        nextBtn.disabled = histPage >= pages;
+        setHidden(pager, false);
+        if (page !== 1) histTab.scrollIntoView({ block: 'nearest' });
       } catch (e) {
-        wrap.innerHTML = '<div class="bambu-loading">Kunne ikke laste historikk.</div>';
+        if (token !== histToken) return;
+        console.warn('[bambu] Kunne ikke laste historikk:', e);
+        if (!histLoaded) {
+          setText(histMsg, 'Kunne ikke laste historikk.');
+          setHidden(histMsg, false);
+        } else {
+          prevBtn.disabled = histPage <= 1;
+          nextBtn.disabled = false;
+        }
+        showError('Kunne ikke laste historikk: ' + e.message);
+      } finally {
+        if (token === histToken) histTab.classList.remove('is-loading');
       }
     }
 
-    function buildSummaryHTML(devs) {
-      let tp = 0, ts = 0, tf = 0, tt = 0, tw = 0;
-      devs.forEach(d => { tp += d.total_prints; ts += d.successful; tf += d.failed; tt += d.total_time_s; tw += d.total_weight_g; });
-      const rate = tp > 0 ? Math.round(ts / tp * 100) : 0;
-      return stat('Prints', tp, 'orange')
-        + stat('Vellykket', ts, 'color:var(--bambu-green)')
-        + stat('Feilet', tf, 'color:var(--bambu-red)')
-        + stat('Suksessrate', rate + '%', 'color:var(--bambu-green)')
-        + stat('Printtid', formatDuration(tt))
-        + stat('Filament', formatWeight(tw));
-    }
-
-    function buildWarningHTML(data) {
-      if (data.data_complete === true) return '';
-      const apiTotal = data.api_total || 0;
-      return '<div class="bambu-stats-warning">'
-        + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>'
-        + ' Historikken lastes inn – tallene er ikke komplette ennå. Last inn siden på nytt om litt.'
-        + (apiTotal > 0 ? ' (Bambu rapporterer ' + apiTotal.toLocaleString('no') + ' tasks totalt)' : '')
-        + '</div>';
-    }
-
-    function buildFullUI(data) {
-      allDevs = data.devices || [];
-      exportBtnHtml = '<a class="bambu-sort-btn bambu-export-btn" href="' + REST + '/export" download>'
-        + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>'
-        + ' Last ned CSV</a>';
-      el.innerHTML = buildWarningHTML(data)
-        + '<div class="bambu-stats-summary">' + buildSummaryHTML(allDevs) + '</div>'
-        + '<div class="bambu-refresh-ind"></div>'
-        + renderTabs()
-        + '<div class="bambu-tab-body">' + buildStatsBody() + '</div>';
-      relink();
-      el.querySelectorAll('.bambu-tab-btn').forEach(btn => {
-        btn.addEventListener('click', () => { currentTab = btn.dataset.tab; switchTab(); });
-      });
-      bindSortBtns();
-    }
-
-    function updateInPlace(data) {
-      allDevs = data.devices || [];
-      const sum = el.querySelector('.bambu-stats-summary');
-      if (sum) sum.innerHTML = buildSummaryHTML(allDevs);
-      if (currentTab === 'stats') render();
-      const ind = el.querySelector('.bambu-refresh-ind');
-      if (ind) ind.classList.remove('bambu-refreshing');
-    }
-
+    // ── Lasting med lokal cache ──
     async function load() {
       let cached = null;
-      try { cached = JSON.parse(localStorage.getItem('bambu_stats_v1')); } catch (e) {}
+      try { cached = JSON.parse(lsGet(STATS_KEY) || 'null'); } catch (e) { cached = null; }
+      if (!cached || typeof cached !== 'object' || !Array.isArray(cached.devices)) cached = null;
 
-      if (cached) {
-        buildFullUI(cached);
-        const ind = el.querySelector('.bambu-refresh-ind');
-        if (ind) ind.classList.add('bambu-refreshing');
-        try {
-          const res  = await fetch(REST + '/stats');
-          const data = await res.json();
-          if (!data.error) {
-            try { localStorage.setItem('bambu_stats_v1', JSON.stringify(data)); } catch (e) {}
-            updateInPlace(data);
-          } else if (ind) { ind.classList.remove('bambu-refreshing'); }
-        } catch (e) { if (ind) ind.classList.remove('bambu-refreshing'); }
-      } else {
-        el.innerHTML = '<div class="bambu-loading">Laster statistikk...</div>';
-        relink();
-        try {
-          const res  = await fetch(REST + '/stats');
-          const data = await res.json();
-          if (data.error) throw new Error(data.error);
-          try { localStorage.setItem('bambu_stats_v1', JSON.stringify(data)); } catch (e) {}
-          buildFullUI(data);
-        } catch (e) {
-          el.innerHTML = '<div class="bambu-loading">Kunne ikke laste statistikk.</div>';
-          relink();
-        }
+      if (cached) renderAll(cached);
+      ind.classList.add('is-active');
+      try {
+        const data = await fetchJSON('/stats');
+        if (data.error) throw new Error(String(data.error));
+        data._fetched_at = Date.now();
+        lsSet(STATS_KEY, JSON.stringify(data));
+        showError('');
+        renderAll(data);
+      } catch (e) {
+        console.warn('[bambu] Kunne ikke hente statistikk:', e);
+        if (cached) showError('Kunne ikke oppdatere statistikken – viser lagrede tall. (' + e.message + ')');
+        else { loading.hidden = true; showError('Kunne ikke laste statistikk: ' + e.message); }
+      } finally {
+        ind.classList.remove('is-active');
       }
     }
+
+    showTab('stats');
     load();
   }
 
-  function stat(label, val, style) {
-    const s = style ? (style === 'orange' ? ' orange' : '" style="' + style) : '';
-    return '<div class="bambu-stat"><span class="bambu-stat-label">' + label + '</span>'
-      + '<span class="bambu-stat-value' + (style === 'orange' ? ' orange' : '') + '"'
-      + (style && style !== 'orange' ? ' style="' + style + '"' : '') + '>' + val + '</span></div>';
+  // ════════════════════════════════════════════════════════════════════════
+  //  Fullskjerm-header: klokke
+  // ════════════════════════════════════════════════════════════════════════
+
+  function initClock() {
+    const clock = document.getElementById('bambu-fs-clock');
+    if (!clock) return;
+    const tick = () => setText(clock, hhmm(new Date()));
+    tick();
+    setInterval(tick, 1000);
   }
 
-  function statsItem(label, val, style) {
-    return '<div><div class="bambu-stats-item-label">' + label + '</div>'
-      + '<div class="bambu-stats-item-value"' + (style ? ' style="' + style + '"' : '') + '>' + val + '</div></div>';
-  }
+  // ── Init ────────────────────────────────────────────────────────────────
 
-  function tp_str(n) { return String(n); }
-
-  // ── Init ─────────────────────────────────────────────────────────────────
-
-  function injectLinkButton(wrap, url, label) {
-    if (!url || !label) return;
-    // Fjern gammel knapp hvis den finnes (unngå duplikater etter innerHTML-oppdateringer)
-    const old = wrap.querySelector('.bambu-link-btn');
-    if (old) old.remove();
-    const btn = document.createElement('a');
-    btn.href        = url;
-    btn.target      = '_blank';
-    btn.rel         = 'noopener';
-    btn.className   = 'bambu-link-btn';
-    btn.textContent = label;
-    wrap.appendChild(btn);
-  }
-
-  document.addEventListener('DOMContentLoaded', function () {
-    // Tema-toggle (brukes i fullskjerm-malen)
-    const toggleBtn = document.getElementById('bambu-theme-toggle');
-    if (toggleBtn) {
-      toggleBtn.addEventListener('click', function () {
-        const wrap = document.getElementById('bambu-dashboard') || document.getElementById('bambu-stats');
-        if (wrap) applyTheme(wrap, !isDark(wrap));
-      });
-    }
-
-    const dash  = document.getElementById('bambu-dashboard');
-    if (dash)  initDashboard(dash, cfg.dashLinkUrl, cfg.dashLinkLabel);
-
+  function init() {
+    initTheme();
+    initClock();
+    const dash = document.getElementById('bambu-dashboard');
+    if (dash) initDashboard(dash);
     const stats = document.getElementById('bambu-stats');
-    if (stats) initStats(stats, cfg.statsLinkUrl, cfg.statsLinkLabel);
-  });
+    if (stats) initStats(stats);
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
 
 })();

@@ -1,6 +1,7 @@
 # ─────────────────────────────────────────────────────────────────
 #  Bambu Lab Dashboard – systemd-tjeneste
-#  Kopiert og tilpasset automatisk av setup.sh
+#  Kopiert og tilpasset automatisk av setup.sh (bruker og stier settes der)
+#  Hold denne og enheten i setup.sh like.
 #  Manuell installasjon:
 #    sudo cp bambu-dashboard.service /etc/systemd/system/
 #    sudo systemctl daemon-reload
@@ -8,16 +9,17 @@
 # ─────────────────────────────────────────────────────────────────
 [Unit]
 Description=Bambu Lab 3D Print Dashboard
-After=network-online.target
-Wants=network-online.target
+# Vent på nettverk og synkronisert klokke (ellers TLS-feil "certificate is not yet valid")
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
 
 [Service]
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/bambu-dashboard
 ExecStart=/home/pi/bambu-dashboard/.venv/bin/python app.py
-Restart=on-failure
-RestartSec=10
+Restart=always
+RestartSec=5
 EnvironmentFile=/home/pi/bambu-dashboard/.env
 
 [Install]
