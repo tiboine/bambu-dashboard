@@ -621,10 +621,19 @@ def on_message(client, userdata, msg):
         # Registrer tidspunkt når en ny jobb starter
         if new_state in ("RUNNING", "PREPARE") and prev_state not in ("RUNNING", "PREPARE"):
             current["job_started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            if prev_state:  # ekte overgang (ikke første melding etter oppstart)
+                current["job_started_epoch"] = time.time()
+                # Hent ny task (bilde + filamentplan) snart, ikke vent på neste minutt-runde
+                threading.Timer(20, fetch_task_covers).start()
         # Nullstill job_started_at når jobben er ferdig/avbrutt
         elif new_state in ("IDLE", "FAILED", "FINISH") and prev_state in ("RUNNING", "PREPARE", "PAUSE"):
             current["job_started_at"] = None
+            current["ended_at"] = time.time()  # brukes for å slippe gammel feil/ferdig-status etter en stund
             job_finished = True
+        elif new_state in ("RUNNING", "PREPARE"):
+            current.pop("ended_at", None)
+        if new_state not in ("RUNNING", "PREPARE", "PAUSE"):
+            current.pop("job_started_epoch", None)
 
         # Oppdater online-status
         if dev_id in state["devices"]:
@@ -719,24 +728,41 @@ def fetch_task_covers():
             dev_id = task.get("deviceId")
             if not dev_id:
                 continue
-            cover = task.get("cover")
-            if cover and dev_id not in covers:
-                covers[dev_id] = cover
+            # Kun nyeste task per printer – ikke fall tilbake på bildet fra en eldre print
             if dev_id not in latest:
+                covers[dev_id] = task.get("cover") or None
                 latest[dev_id] = {
                     "id":        str(task.get("id", "")),
                     "startTime": task.get("startTime", ""),
                     "weight":    task.get("weight", 0) or 0,
                     "length":    task.get("length", 0) or 0,
                     "status":    task.get("status"),
+                    "endTime":   task.get("endTime", ""),
                 }
-        state["task_covers"] = covers
+        state["task_covers"] = {k: v for k, v in covers.items() if v}
         state["latest_tasks"] = latest
     except Exception as e:
         print(f"[Feil] Kunne ikke hente task covers: {e}")
 
 
 # ── Bygg printer-liste fra devices + MQTT-data ──
+
+STALE_FAIL_S   = 15 * 60  # vis "Feil" i 15 min etter at printen feilet
+STALE_FINISH_S = 5 * 60   # "Ferdig" i 5 min (frontend viser grønn puls de første 2)
+
+
+def _iso_to_epoch(iso):
+    """Bambu ISO-tid (UTC) → unix-sekunder, eller None."""
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
 
 def build_printer_list():
     printers = []
@@ -788,6 +814,15 @@ def build_printer_list():
         }
         print_status = status_map.get(gcode_state, gcode_state or "")
 
+        # Printeren rapporterer FAILED/FINISH helt til neste jobb starter. Etter en
+        # stund er den bare ledig – ikke vis forrige print som om den var aktuell.
+        if gcode_state in ("FAILED", "FINISH"):
+            ended = mqtt_data.get("ended_at") or _iso_to_epoch(
+                state.get("latest_tasks", {}).get(dev_id, {}).get("endTime"))
+            keep = STALE_FAIL_S if gcode_state == "FAILED" else STALE_FINISH_S
+            if not ended or time.time() - ended > keep:
+                print_status = "IDLE"
+
         time_remaining = None
         if remaining_min is not None:
             try:
@@ -797,6 +832,17 @@ def build_printer_list():
 
         # Hent cover-bilde fra tasks API
         thumbnail = state.get("task_covers", {}).get(dev_id)
+        # Ny jobb startet, men nyeste kjente task startet før den → ny task ikke hentet
+        # ennå, så bildet tilhører forrige print. (Kun når vi selv så jobben starte.)
+        started = mqtt_data.get("job_started_epoch")
+        task_start = _iso_to_epoch(state.get("latest_tasks", {}).get(dev_id, {}).get("startTime"))
+        if print_status in ("RUNNING", "PAUSED") and started and task_start and task_start < started - 300:
+            thumbnail = None
+        if print_status in ("IDLE", "") or not dev.get("online", False):
+            thumbnail = None
+            task_name = ""
+            progress = None
+            time_remaining = None
         job_started_at = mqtt_data.get("job_started_at")
 
         printers.append({
