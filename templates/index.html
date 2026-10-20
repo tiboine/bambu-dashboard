@@ -37,6 +37,22 @@
     }
     body.fit .card { width: var(--card-w, 280px); height: var(--card-h, 340px); }
     body.fit .card-visual { flex: 1 1 0; height: auto; min-height: 0; }
+    /* Kortet har fast størrelse i tilpass-modus → innholdet kan tilpasse seg høyden */
+    body.fit .card { container-type: size; }
+    @container (max-height: 300px) {
+      .card .card-model { display: none; }
+      .card .card-head { padding: 0.5rem 0.7rem 0.2rem; }
+      .card .card-visual { margin: 0.1rem 0.7rem 0; min-height: 44px; }
+      .card .card-job { margin: 0.3rem 0.7rem 0; }
+      .card .card-main { padding: 0.25rem 0.7rem 0.1rem; }
+      .card .readout { min-height: 0; }
+      .card .bar { margin-top: 0.35rem; }
+      .card .card-meta { padding: 0.35rem 0.7rem 0.5rem; }
+    }
+    @container (max-height: 230px) {
+      .card .card-meta, .card .card-job { display: none; }
+      .card .card-main { padding-bottom: 0.55rem; }
+    }
 
     /* ── Printerkort ────────────────────────────────────────── */
     .card {
@@ -789,26 +805,22 @@
 
   // ── Tilpass-til-skjerm: finn kolonner/rader som gir størst mulige kort ──
   let fit = false;
+  // Antall kort per rad i tilpass-til-skjerm: ?cols=N, ellers 5 (15 printere = 3 hele rader)
+  const FIT_COLS = Math.max(1, Math.min(10, parseInt(params.get('cols'), 10) || 5));
+
   function layoutFit() {
     if (!fit) return;
     const n = cards.size;
     if (!n) return;
     const gap = parseFloat(getComputedStyle(grid).columnGap) || 12;
     const W = grid.clientWidth, H = grid.clientHeight;
-    const ratio = 0.82;  // ønsket bredde/høyde for et kort
-    let best = null;
-    for (let cols = 1; cols <= n; cols++) {
-      const rows = Math.ceil(n / cols);
-      const w = (W - gap * (cols - 1)) / cols;
-      const h = (H - gap * (rows - 1)) / rows;
-      if (w <= 0 || h <= 0) continue;
-      const cw = Math.min(w, h * ratio * 1.35);   // tillat litt bredere kort enn idealet
-      const score = Math.min(cw, h * ratio);
-      if (!best || score > best.score) best = { score, w: cw, h };
-    }
-    if (!best) return;
-    grid.style.setProperty('--card-w', Math.floor(best.w) + 'px');
-    grid.style.setProperty('--card-h', Math.floor(best.h) - 1 + 'px');  // -1: aldri overflyt pga. avrunding
+    const cols = Math.min(n, FIT_COLS);
+    const rows = Math.ceil(n / cols);
+    const w = (W - gap * (cols - 1)) / cols;
+    const h = (H - gap * (rows - 1)) / rows;
+    if (w <= 0 || h <= 0) return;
+    grid.style.setProperty('--card-w', Math.floor(w) + 'px');
+    grid.style.setProperty('--card-h', Math.floor(h) - 1 + 'px');  // -1: aldri overflyt pga. avrunding
   }
 
   function setFit(on) {
