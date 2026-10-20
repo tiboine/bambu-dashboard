@@ -462,6 +462,34 @@
   transition: opacity .5s, filter .5s;
 }
 .bambu-wrap .bambu-card:not(.has-job):not([data-state="done"]) .bambu-thumb { opacity: 0.32; filter: grayscale(1); }
+
+/* ── Hologram: forhåndsbildet vipper rolig og svever mens printeren jobber ── */
+.bambu-wrap .bambu-card-visual { perspective: 520px; }
+.bambu-wrap .bambu-card[data-state="printing"] .bambu-thumb,
+.bambu-wrap .bambu-card[data-state="paused"] .bambu-thumb {
+  animation: bambu-holo-sway 4.8s ease-in-out var(--holo-delay, 0s) infinite alternate;
+  will-change: transform;
+}
+.bambu-wrap .bambu-card[data-state="paused"] .bambu-thumb { animation-play-state: paused; }
+.bambu-wrap .bambu-card[data-state="printing"] .bambu-card-visual::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; top: 0;
+  height: 35%;
+  background: linear-gradient(180deg, transparent, rgba(var(--bambu-accent-rgb), 0.14), transparent);
+  animation: bambu-holo-scan 3.4s linear var(--holo-delay, 0s) infinite;
+  pointer-events: none;
+}
+@keyframes bambu-holo-sway {
+  0%   { transform: rotateY(-26deg) translateY(2px); }
+  50%  { transform: rotateY(0deg)   translateY(-5px); }
+  100% { transform: rotateY(26deg)  translateY(2px); }
+}
+@keyframes bambu-holo-scan {
+  from { transform: translateY(-100%); }
+  to   { transform: translateY(300%); }
+}
+
 .bambu-wrap .bambu-card.has-thumb .bambu-placeholder { display: none; }
 .bambu-wrap .bambu-placeholder { width: 34%; max-width: 74px; height: auto; color: rgba(var(--bambu-accent-rgb), 0.55); stroke-width: 1.6; stroke-linejoin: round; }
 

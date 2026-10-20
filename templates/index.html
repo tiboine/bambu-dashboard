@@ -169,6 +169,33 @@
       transition: opacity .5s, filter .5s;
     }
     .card:not(.has-job):not([data-state="done"]) .thumb { opacity: 0.32; filter: grayscale(1); }
+
+    /* ── Hologram: forhåndsbildet vipper rolig og svever mens printeren jobber ── */
+    .card-visual { perspective: 520px; }
+    .card[data-state="printing"] .thumb,
+    .card[data-state="paused"] .thumb {
+      animation: holo-sway 4.8s ease-in-out var(--holo-delay, 0s) infinite alternate;
+      will-change: transform;
+    }
+    .card[data-state="paused"] .thumb { animation-play-state: paused; }
+    .card[data-state="printing"] .card-visual::after {
+      content: '';
+      position: absolute;
+      left: 0; right: 0; top: 0;
+      height: 35%;
+      background: linear-gradient(180deg, transparent, rgba(var(--accent-rgb), 0.14), transparent);
+      animation: holo-scan 3.4s linear var(--holo-delay, 0s) infinite;
+      pointer-events: none;
+    }
+    @keyframes holo-sway {
+      0%   { transform: rotateY(-26deg) translateY(2px); }
+      50%  { transform: rotateY(0deg)   translateY(-5px); }
+      100% { transform: rotateY(26deg)  translateY(2px); }
+    }
+    @keyframes holo-scan {
+      from { transform: translateY(-100%); }
+      to   { transform: translateY(300%); }
+    }
     .card.has-thumb .placeholder { display: none; }
     .placeholder { width: 34%; max-width: 74px; height: auto; color: rgba(var(--accent-rgb), 0.55); }
 
@@ -554,6 +581,7 @@
   function createCard(id) {
     const el = $('#card-tpl').content.firstElementChild.cloneNode(true);
     el.dataset.dev = id;
+    el.style.setProperty('--holo-delay', -(Math.random() * 9).toFixed(2) + 's');  // ikke i takt
     el._ = {
       fill: $('.card-fill', el), name: $('.card-name', el), model: $('.card-model', el),
       chip: $('.chip-text', el), thumb: $('.thumb', el),

@@ -3,7 +3,7 @@
  * Plugin Name: Bambu Lab 3D Print Dashboard (PHP)
  * Plugin URI: https://makerspaceringebu.no
  * Description: Sanntids 3D-print dashboard for Bambu Lab – ren PHP, ingen ekstern server nødvendig. Bruk [bambu_dashboard] og [bambu_stats].
- * Version: 1.5.4
+ * Version: 1.5.5
  * Author: Makerspace Ringebu
  * License: GPL v2 or later
  * Text Domain: bambu-dashboard-php
@@ -15,7 +15,7 @@ class BambuDashboardPHP {
 
     private static $instance = null;
     const API        = 'https://api.bambulab.com';
-    const VERSION    = '1.5.4';
+    const VERSION    = '1.5.5';
     const DB_VERSION = '1';
     const TEMPLATE   = 'bambu-dashboard-php/templates/fullscreen.php';
     const CRON_HOOK  = 'bambu_php_cron';

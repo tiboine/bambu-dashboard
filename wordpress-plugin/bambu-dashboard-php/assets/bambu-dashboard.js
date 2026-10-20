@@ -405,6 +405,7 @@
     function createCard(id) {
       const el = fromHTML(CARD_HTML);
       el.dataset.dev = id;
+      el.style.setProperty('--holo-delay', -(Math.random() * 9).toFixed(2) + 's');  // hologram ikke i takt
       const q = s => el.querySelector(s);
       el._r = {
         fill: q('.bambu-card-fill'), name: q('.bambu-card-name'), model: q('.bambu-card-model'),
