@@ -17,6 +17,18 @@ from pathlib import Path
 load_dotenv()
 
 app = Flask(__name__)
+def _app_version():
+    """Git-commit + oppstartstid. Endres ved hver restart, så kiosken laster seg selv på nytt."""
+    try:
+        import subprocess
+        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=Path(__file__).parent,
+                                capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        commit = ""
+    return f"{commit or 'ukjent'}-{int(time.time())}"
+
+APP_VERSION = _app_version()
+
 TOKEN_FILE  = Path(__file__).parent / ".token.json"
 STATS_FILE  = Path(__file__).parent / "stats_store.json"
 STATS_BAK   = STATS_FILE.with_suffix(".json.bak")
@@ -938,6 +950,7 @@ def api_status():
         "error": state["error"],
         "needs_verify_code": state["needs_verify_code"],
         "mqtt_connected": state["mqtt_connected"],
+        "app_version":    APP_VERSION,
     })
 
 
