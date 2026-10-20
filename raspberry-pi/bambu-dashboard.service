@@ -10,8 +10,8 @@
 [Unit]
 Description=Bambu Lab 3D Print Dashboard
 # Vent på nettverk og synkronisert klokke (ellers TLS-feil "certificate is not yet valid")
-After=network-online.target time-sync.target
-Wants=network-online.target time-sync.target
+After=network-online.target msr-timesync.service
+Wants=network-online.target msr-timesync.service
 
 [Service]
 Type=simple
