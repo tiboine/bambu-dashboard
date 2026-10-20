@@ -3,7 +3,7 @@
  * Plugin Name: Bambu Lab 3D Print Dashboard (PHP)
  * Plugin URI: https://makerspaceringebu.no
  * Description: Sanntids 3D-print dashboard for Bambu Lab – ren PHP, ingen ekstern server nødvendig. Bruk [bambu_dashboard] og [bambu_stats].
- * Version: 1.4.0
+ * Version: 1.5.3
  * Author: Makerspace Ringebu
  * License: GPL v2 or later
  * Text Domain: bambu-dashboard-php
@@ -14,17 +14,36 @@ if (!defined('ABSPATH')) exit;
 class BambuDashboardPHP {
 
     private static $instance = null;
-    const API = 'https://api.bambulab.com';
+    const API        = 'https://api.bambulab.com';
+    const VERSION    = '1.5.3';
+    const DB_VERSION = '1';
+    const TEMPLATE   = 'bambu-dashboard-php/templates/fullscreen.php';
+    const CRON_HOOK  = 'bambu_php_cron';
+    // Bambu task-status: 1 = pågår, 2 = fullført, 3 = feilet/avbrutt
+    const STATUS_RUNNING = 1;
 
     public static function instance() {
         if (self::$instance === null) self::$instance = new self();
         return self::$instance;
     }
 
+    /** Aktivering: opprett tabell og planlegg cron */
+    public static function activate() {
+        $self = self::instance();
+        $self->create_table();
+        update_option('bambu_php_db_version', self::DB_VERSION);
+        $self->schedule_cron();
+    }
+
+    /** Deaktivering: fjern planlagt cron */
+    public static function deactivate() {
+        wp_clear_scheduled_hook(self::CRON_HOOK);
+    }
+
     private function __construct() {
         add_action('plugins_loaded',     [$this, 'maybe_create_table']);
         add_action('init',               [$this, 'schedule_cron']);
-        add_action('bambu_php_cron',     [$this, 'cron_sync']);
+        add_action(self::CRON_HOOK,      [$this, 'cron_sync']);
         add_action('admin_menu',         [$this, 'admin_menu']);
         add_action('rest_api_init',      [$this, 'register_rest_routes']);
         add_action('wp_enqueue_scripts', [$this, 'enqueue_assets']);
@@ -35,15 +54,18 @@ class BambuDashboardPHP {
     }
 
     public function register_page_template($templates) {
-        $templates['bambu-dashboard-php/templates/fullscreen.php'] = 'Bambu Fullskjerm';
+        $templates[self::TEMPLATE] = 'Bambu Fullskjerm';
         return $templates;
+    }
+
+    private function uses_fullscreen_template($post) {
+        return $post && get_post_meta($post->ID, '_wp_page_template', true) === self::TEMPLATE;
     }
 
     public function load_page_template($template) {
         global $post;
         if (!$post) return $template;
-        $selected = get_post_meta($post->ID, '_wp_page_template', true);
-        if ($selected === 'bambu-dashboard-php/templates/fullscreen.php') {
+        if ($this->uses_fullscreen_template($post)) {
             $path = plugin_dir_path(__FILE__) . 'templates/fullscreen.php';
             if (file_exists($path)) return $path;
         }
@@ -57,18 +79,38 @@ class BambuDashboardPHP {
         $expires = (float) get_option('bambu_php_token_expires', 0);
         if ($token && time() < $expires) return $token;
 
+        // Ikke auto-logg inn mens vi venter på verifiseringskode – hver innlogging
+        // sender ny e-post og ugyldiggjør forrige kode.
+        if (get_option('bambu_php_needs_verify')) return null;
+
+        // Struping: maks ett automatisk innloggingsforsøk per 5 min
+        if (get_transient('bambu_php_login_throttle')) return null;
+        set_transient('bambu_php_login_throttle', 1, 5 * MINUTE_IN_SECONDS);
+
         $result = $this->do_login();
         if (is_wp_error($result)) return null;
-        return get_option('bambu_php_token');
+        return get_option('bambu_php_token') ?: null;
     }
 
-    private function store_token(array $data) {
+    /** Glem lagret token (f.eks. etter HTTP 401 fra Bambu) */
+    private function forget_token() {
+        delete_option('bambu_php_token');
+        delete_option('bambu_php_token_expires');
+    }
+
+    private function store_token($data) {
+        if (!is_array($data)) $data = [];
         $token = $data['accessToken'] ?? $data['access_token'] ?? null;
         if (!$token) return new WP_Error('no_token', 'Fikk ikke token fra Bambu API');
 
+        // Bruk expiresIn (sekunder) fra API når den finnes, ellers 90 dager
+        $ttl = (int)($data['expiresIn'] ?? $data['expires_in'] ?? 0);
+        if ($ttl <= 0) $ttl = 86400 * 90;
+
         update_option('bambu_php_token',         $token);
-        update_option('bambu_php_token_expires', time() + 86400 * 90);
+        update_option('bambu_php_token_expires', time() + $ttl);
         update_option('bambu_php_needs_verify',  false);
+        delete_transient('bambu_php_login_throttle');
 
         // Hent user_id fra JWT-payload
         $parts = explode('.', $token);
@@ -90,6 +132,30 @@ class BambuDashboardPHP {
         ];
     }
 
+    /**
+     * GET mot Bambu API. Returnerer dekodet JSON-array eller WP_Error.
+     * Ved HTTP 401 slettes token og vi prøver én ny innlogging (respekterer strupingen).
+     */
+    private function api_get($path, $timeout = 15, $retry = true) {
+        if (!$this->get_token()) return new WP_Error('no_token', 'Ikke innlogget');
+
+        $resp = wp_remote_get(self::API . $path, ['headers' => $this->api_headers(), 'timeout' => $timeout]);
+        if (is_wp_error($resp)) return $resp;
+
+        $code = (int) wp_remote_retrieve_response_code($resp);
+        if ($code === 401) {
+            $this->forget_token();
+            if ($retry) return $this->api_get($path, $timeout, false);
+            return new WP_Error('unauthorized', 'Bambu API avviste token (401)');
+        }
+        if ($code < 200 || $code >= 300) {
+            return new WP_Error('http_' . $code, 'Bambu API svarte med HTTP ' . $code);
+        }
+
+        $body = json_decode(wp_remote_retrieve_body($resp), true);
+        return is_array($body) ? $body : [];
+    }
+
     // ── Autentisering ─────────────────────────────────────────────────────────
 
     public function do_login($email = null, $password = null) {
@@ -108,16 +174,40 @@ class BambuDashboardPHP {
         $body = json_decode(wp_remote_retrieve_body($resp), true);
         if (($body['loginType'] ?? '') === 'verifyCode') {
             update_option('bambu_php_needs_verify', true);
-            // Trigger sending av verifiserings-e-post
-            wp_remote_post(self::API . '/v1/user-service/user/sendemail/code', [
-                'headers' => ['Content-Type' => 'application/json'],
-                'body'    => wp_json_encode(['email' => $email, 'type' => 'codeLogin']),
-                'timeout' => 15,
-            ]);
-            return new WP_Error('verify_required', 'Verifiseringskode sendt til ' . $email . ' – sjekk innboksen din');
+            $sent = $this->send_verify_code($email);
+            if (is_wp_error($sent)) return $sent;
+            return new WP_Error('verify_required', 'Verifiseringskode sendt til ' . $email . ' – sjekk innboksen (og søppelpost)');
+        }
+        if (empty($body['accessToken']) && empty($body['access_token'])) {
+            $code = (int) wp_remote_retrieve_response_code($resp);
+            $msg  = $body['message'] ?? $body['error'] ?? '';
+            return new WP_Error('login_failed', 'Innlogging feilet (HTTP ' . $code . ')' . ($msg ? ': ' . mb_substr((string) $msg, 0, 200) : ''));
         }
 
         return $this->store_token($body);
+    }
+
+    /** Be Bambu sende innloggingskode på e-post. Returnerer true eller WP_Error med Bambus svar. */
+    public function send_verify_code($email = null) {
+        if (!$email) $email = get_option('bambu_php_email');
+        if (!$email) return new WP_Error('no_creds', 'E-post må settes i innstillingene');
+        $resp = wp_remote_post(self::API . '/v1/user-service/user/sendemail/code', [
+            'headers' => ['Content-Type' => 'application/json'],
+            'body'    => wp_json_encode(['email' => $email, 'type' => 'codeLogin']),
+            'timeout' => 15,
+        ]);
+        if (is_wp_error($resp)) {
+            return new WP_Error('send_failed', 'Kunne ikke kontakte Bambu: ' . $resp->get_error_message());
+        }
+        $code = (int) wp_remote_retrieve_response_code($resp);
+        if ($code < 200 || $code >= 300) {
+            $raw  = wp_remote_retrieve_body($resp);
+            $body = json_decode($raw, true);
+            $msg  = is_array($body) ? ($body['message'] ?? $body['error'] ?? '') : '';
+            if (!$msg && stripos($raw, 'cloudflare') !== false) $msg = 'blokkert av Cloudflare (serverens IP er sannsynligvis sperret av Bambu)';
+            return new WP_Error('send_failed', 'Bambu avviste utsending av kode (HTTP ' . $code . ')' . ($msg ? ': ' . mb_substr((string) $msg, 0, 200) : ''));
+        }
+        return true;
     }
 
     public function do_verify($code) {
@@ -139,21 +229,18 @@ class BambuDashboardPHP {
 
         if (!$this->get_token()) return new WP_Error('no_token', 'Ikke innlogget');
 
-        // Enhetsliste
-        $bind = wp_remote_get(self::API . '/v1/iot-service/api/user/bind', [
-            'headers' => $this->api_headers(), 'timeout' => 15,
-        ]);
+        // Enhetsliste – ved feil returneres WP_Error og ingenting caches
+        $bind = $this->api_get('/v1/iot-service/api/user/bind');
         if (is_wp_error($bind)) return $bind;
-        $devices = json_decode(wp_remote_retrieve_body($bind), true)['devices'] ?? [];
+        $devices = $bind['devices'] ?? [];
+        $this->cache_device_info($devices);
 
         // Print-status
-        $print_resp = wp_remote_get(self::API . '/v1/iot-service/api/user/print', [
-            'headers' => $this->api_headers(), 'timeout' => 15,
-        ]);
+        $print_resp = $this->api_get('/v1/iot-service/api/user/print');
         $print_map = [];
         if (!is_wp_error($print_resp)) {
-            foreach (json_decode(wp_remote_retrieve_body($print_resp), true)['devices'] ?? [] as $d) {
-                $print_map[$d['dev_id']] = $d;
+            foreach ($print_resp['devices'] ?? [] as $d) {
+                if (!empty($d['dev_id'])) $print_map[$d['dev_id']] = $d;
             }
         }
 
@@ -167,7 +254,8 @@ class BambuDashboardPHP {
         // Slå sammen
         $printers = [];
         foreach ($devices as $dev) {
-            $dev_id = $dev['dev_id'];
+            $dev_id = $dev['dev_id'] ?? null;
+            if (!$dev_id) continue;
             $pd     = $print_map[$dev_id] ?? [];
 
             $progress   = $pd['progress']   ?? null;
@@ -206,41 +294,79 @@ class BambuDashboardPHP {
     }
 
     private function fetch_today() {
-        $cached = get_transient('bambu_php_today');
-        if ($cached !== false) return $cached;
+        $empty = ['prints' => 0, 'active' => 0, 'weight_g' => 0, 'time_s' => 0, 'length_cm' => 0];
 
-        if (!$this->get_token()) return ['prints' => 0, 'weight_g' => 0, 'time_s' => 0];
+        // Task-listen caches i 60 s; selve summen regnes ut på hvert kall så
+        // pågående prints følger fremdriften (status caches selv i 30 s).
+        $tasks = get_transient('bambu_php_today_tasks');
+        if ($tasks === false) {
+            $resp = $this->api_get('/v1/user-service/my/tasks?limit=100');
+            if (is_wp_error($resp)) return $empty;
+            $tasks = is_array($resp['hits'] ?? null) ? $resp['hits'] : [];
+            set_transient('bambu_php_today_tasks', $tasks, 60);
+        }
 
-        $resp = wp_remote_get(self::API . '/v1/user-service/my/tasks?limit=100', [
-            'headers' => $this->api_headers(), 'timeout' => 15,
-        ]);
-        if (is_wp_error($resp)) return ['prints' => 0, 'weight_g' => 0, 'time_s' => 0];
-
-        $today = gmdate('Y-m-d');
-        $prints = $weight = $time_s = $length_cm = 0;
-        foreach (json_decode(wp_remote_retrieve_body($resp), true)['hits'] ?? [] as $t) {
-            if (substr($t['startTime'] ?? '', 0, 10) === $today) {
-                $prints++;
-                $weight    += $t['weight']   ?? 0;
-                $time_s    += $t['costTime'] ?? 0;
-                $length_cm += $t['length']   ?? 0;
+        // Fremdrift per printer som printer akkurat nå
+        $live = [];
+        $printers = $this->fetch_status();
+        if (!is_wp_error($printers)) {
+            foreach ((array) $printers as $p) {
+                $st = strtoupper((string) ($p['print_status'] ?? ''));
+                if (in_array($st, ['RUNNING', 'PRINTING', 'PREPARE', 'PAUSED', 'PAUSE'], true)) {
+                    $live[(string) ($p['id'] ?? '')] = max(0, min(100, (float) ($p['progress'] ?? 0))) / 100;
+                }
             }
         }
 
-        $result = ['prints' => $prints, 'weight_g' => $weight, 'time_s' => $time_s, 'length_cm' => $length_cm];
-        set_transient('bambu_php_today', $result, 60);
-        return $result;
+        // Dagsgrense i nettstedets tidssone (ikke UTC)
+        $today     = wp_date('Y-m-d');
+        $day_start = (new DateTimeImmutable('today', wp_timezone()))->getTimestamp();
+        $now       = time();
+        $r = $empty;
+        $counted_live = [];
+        foreach ($tasks as $t) {
+            $ts      = $this->to_timestamp($t['startTime'] ?? null);
+            $dev     = (string) ($t['deviceId'] ?? '');
+            $running = in_array((int) ($t['status'] ?? -1), [0, self::STATUS_RUNNING], true);
+
+            if ($running && isset($live[$dev]) && !isset($counted_live[$dev])) {
+                // Pågående: planlagt forbruk × fremdrift, tid = medgått tid i dag
+                $counted_live[$dev] = true;
+                $pct = $live[$dev];
+                $r['prints']++;
+                $r['active']++;
+                $r['weight_g']  += ($t['weight'] ?? 0) * $pct;
+                $r['length_cm'] += ($t['length'] ?? 0) * $pct;
+                if ($ts) $r['time_s'] += max(0, $now - max($ts, $day_start));
+                continue;
+            }
+            if ($running) continue; // gammel/ukjent pågående task – ikke tell forbruk
+            if ($ts && wp_date('Y-m-d', $ts) === $today) {
+                $r['prints']++;
+                $r['weight_g']  += $t['weight']   ?? 0;
+                $r['time_s']    += $t['costTime'] ?? 0;
+                $r['length_cm'] += $t['length']   ?? 0;
+            }
+        }
+        // Printere som printer, men der tasken ikke er synlig ennå (nettopp startet)
+        foreach ($live as $dev => $pct) {
+            if (!isset($counted_live[$dev])) { $r['prints']++; $r['active']++; }
+        }
+
+        $r['weight_g']  = round($r['weight_g'], 1);
+        $r['length_cm'] = round($r['length_cm'], 1);
+        return $r;
     }
 
     private function fetch_stats() {
-        $quick = get_transient('bambu_php_stats');
+        $quick = get_transient('bambu_php_stats_v2');
         if ($quick !== false) return $quick;
 
         if (!$this->get_token()) return new WP_Error('no_token', 'Ikke innlogget');
 
         $dev_info = $this->get_device_info();
 
-        $hist = get_option('bambu_php_hist_stats', [
+        $hist = wp_parse_args((array) get_option('bambu_php_hist_stats', []), [
             'boundary'  => null,
             'complete'  => false,
             'api_total' => 0,
@@ -256,7 +382,8 @@ class BambuDashboardPHP {
             if ($i === 0) $api_total = $page['total'];
             $recent = array_merge($recent, $page['hits']);
             if (count($page['hits']) < 100) break;
-            $after = end($page['hits'])['id'];
+            $after = end($page['hits'])['id'] ?? null;
+            if (!$after) break;
         }
         if ($api_total > 0) $hist['api_total'] = $api_total;
 
@@ -264,13 +391,17 @@ class BambuDashboardPHP {
             $this->insert_print($task, $dev_info);
         }
 
-        // History fetch if not yet complete (INSERT IGNORE handles dedup)
-        if (!$hist['complete'] && !empty($recent)) {
-            $after      = $hist['boundary'] ?: end($recent)['id'];
+        // Historikk-henting hvis ikke komplett (upsert håndterer duplikater).
+        // Lås hindrer at samtidige /stats- eller /export-kall starter hver sin lange gjennomgang.
+        $crawl_locked = (bool) get_transient('bambu_php_crawl_lock');
+        if (!$hist['complete'] && !empty($recent) && !$crawl_locked) {
+            set_transient('bambu_php_crawl_lock', 1, 60);
+            $after      = $hist['boundary'] ?: (end($recent)['id'] ?? null);
             $deadline   = microtime(true) + 20;
             $seen_pages = [];
-            while (microtime(true) < $deadline) {
+            while ($after && microtime(true) < $deadline) {
                 $page     = $this->fetch_task_page($after);
+                if (!empty($page['error'])) break; // nettverksfeil – ikke marker som komplett
                 $first_id = $page['hits'][0]['id'] ?? null;
                 if (empty($page['hits']) || $first_id === null) { $hist['complete'] = true; break; }
                 if (isset($seen_pages[$first_id]))               { $hist['complete'] = true; break; }
@@ -278,10 +409,11 @@ class BambuDashboardPHP {
                 foreach ($page['hits'] as $task) {
                     $this->insert_print($task, $dev_info);
                 }
-                $hist['boundary'] = end($page['hits'])['id'];
+                $hist['boundary'] = end($page['hits'])['id'] ?? null;
                 if (count($page['hits']) < 100) { $hist['complete'] = true; break; }
                 $after = $hist['boundary'];
             }
+            delete_transient('bambu_php_crawl_lock');
         }
 
         update_option('bambu_php_hist_stats', $hist);
@@ -289,7 +421,7 @@ class BambuDashboardPHP {
         global $wpdb;
         $table    = $wpdb->prefix . 'bambu_prints';
         $db_count = (int) $wpdb->get_var("SELECT COUNT(*) FROM `$table`");
-        $db_stats = $this->get_stats_from_db();
+        $db_stats = $this->get_stats_from_db($dev_info);
         $total    = array_sum(array_column($db_stats, 'total_prints'));
 
         $result = [
@@ -305,20 +437,27 @@ class BambuDashboardPHP {
         ];
 
         $ttl = $hist['complete'] ? 300 : 30;
-        set_transient('bambu_php_stats', $result, $ttl);
+        set_transient('bambu_php_stats_v2', $result, $ttl);
         return $result;
     }
 
     /** Hent én side med tasks fra Bambu API – returnerer ['hits'=>[], 'total'=>N] */
     private function fetch_task_page($after = null) {
-        $url  = self::API . '/v1/user-service/my/tasks?limit=100' . ($after ? '&after=' . urlencode($after) : '');
-        $resp = wp_remote_get($url, ['headers' => $this->api_headers(), 'timeout' => 20]);
-        if (is_wp_error($resp)) return ['hits' => [], 'total' => 0];
-        $body = json_decode(wp_remote_retrieve_body($resp), true) ?? [];
+        $path = '/v1/user-service/my/tasks?limit=100' . ($after ? '&after=' . urlencode($after) : '');
+        $body = $this->api_get($path, 20);
+        if (is_wp_error($body)) return ['hits' => [], 'total' => 0, 'error' => true];
         return [
-            'hits'  => $body['hits']  ?? [],
+            'hits'  => is_array($body['hits'] ?? null) ? $body['hits'] : [],
             'total' => (int)($body['total'] ?? 0),
         ];
+    }
+
+    /** Konverter Bambu-tid (ISO-streng eller ms/s-tall) til unix-sekunder, eller null */
+    private function to_timestamp($v) {
+        if (!$v) return null;
+        $ts = (is_numeric($v) && abs($v) > 1e10) ? intdiv((int)$v, 1000)
+            : (is_numeric($v) ? (int)$v : strtotime((string)$v));
+        return ($ts && $ts > 0) ? $ts : null;
     }
 
     /** Aggreger én task inn i stats-array */
@@ -344,33 +483,40 @@ class BambuDashboardPHP {
         $s['total_length_cm'] += $task['length']   ?? 0;
     }
 
-    /** Hent enhetsnavn og modell */
+    /** Hent enhetsnavn og modell (cachet 1 time; tom liste caches ikke) */
     private function get_device_info() {
-        $bind = wp_remote_get(self::API . '/v1/iot-service/api/user/bind', [
-            'headers' => $this->api_headers(), 'timeout' => 15,
-        ]);
+        $cached = get_transient('bambu_php_devinfo');
+        if (is_array($cached) && $cached) return $cached;
+
+        $bind = $this->api_get('/v1/iot-service/api/user/bind');
+        if (is_wp_error($bind)) return [];
+        return $this->cache_device_info($bind['devices'] ?? []);
+    }
+
+    /** Bygg dev_id → [name, model] fra bind-liste og cache den */
+    private function cache_device_info(array $devices) {
         $info = [];
-        if (!is_wp_error($bind)) {
-            foreach (json_decode(wp_remote_retrieve_body($bind), true)['devices'] ?? [] as $d) {
-                $info[$d['dev_id']] = [
-                    'name'  => $d['name']             ?? $d['dev_id'],
-                    'model' => $d['dev_product_name'] ?? 'Ukjent',
-                ];
-            }
+        foreach ($devices as $d) {
+            if (empty($d['dev_id'])) continue;
+            $info[$d['dev_id']] = [
+                'name'  => $d['name']             ?? $d['dev_id'],
+                'model' => $d['dev_product_name'] ?? 'Ukjent',
+            ];
         }
+        if ($info) set_transient('bambu_php_devinfo', $info, HOUR_IN_SECONDS);
         return $info;
     }
 
     // ── Cron + Pi-integrasjon ────────────────────────────────────────────────
 
     public function schedule_cron() {
-        if (!wp_next_scheduled('bambu_php_cron')) {
-            wp_schedule_event(time(), 'hourly', 'bambu_php_cron');
+        if (!wp_next_scheduled(self::CRON_HOOK)) {
+            wp_schedule_event(time(), 'hourly', self::CRON_HOOK);
         }
     }
 
     public function cron_sync() {
-        delete_transient('bambu_php_stats');
+        delete_transient('bambu_php_stats_v2');
         $this->fetch_stats();
     }
 
@@ -391,12 +537,18 @@ class BambuDashboardPHP {
     /** POST /bambu/v1/push-print – Pi sender ferdig print til WordPress */
     public function rest_push_print(WP_REST_Request $req) {
         $task = $req->get_json_params();
-        if (empty($task['id'])) {
+        if (!is_array($task) || empty($task['id'])) {
             return new WP_Error('missing_id', 'task id påkrevd', ['status' => 400]);
         }
-        $inserted = $this->insert_print($task, []);
-        if ($inserted) delete_transient('bambu_php_stats');
-        return rest_ensure_response(['inserted' => $inserted, 'task_id' => $task['id']]);
+        // Bruk cachet enhetsinfo så navn/modell blir riktig selv om Pi ikke sender dem
+        $result = $this->insert_print($task, $this->get_device_info());
+        if (in_array($result, ['inserted', 'updated'], true)) delete_transient('bambu_php_stats_v2');
+        return rest_ensure_response([
+            'inserted' => $result === 'inserted',
+            'updated'  => $result === 'updated',
+            'result'   => $result, // inserted | updated | unchanged | skipped_running | error
+            'task_id'  => $task['id'],
+        ]);
     }
 
     /** GET /bambu/v1/cron-sync?key=… – For ekte cron-jobb (cPanel/Linux) */
@@ -405,7 +557,7 @@ class BambuDashboardPHP {
         if (!$key || !hash_equals($this->get_pi_key(), $key)) {
             return new WP_Error('unauthorized', 'Ugyldig nøkkel', ['status' => 401]);
         }
-        delete_transient('bambu_php_stats');
+        delete_transient('bambu_php_stats_v2');
         $result = $this->fetch_stats();
         if (is_wp_error($result)) {
             return rest_ensure_response(['ok' => false, 'error' => $result->get_error_message()]);
@@ -420,11 +572,11 @@ class BambuDashboardPHP {
 
     // ── Database ─────────────────────────────────────────────────────────────
 
+    /** Kjør dbDelta kun når lagret db-versjon avviker (ingen SHOW TABLES per request) */
     public function maybe_create_table() {
-        global $wpdb;
-        $table = $wpdb->prefix . 'bambu_prints';
-        if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table)) !== $table) {
+        if (get_option('bambu_php_db_version') !== self::DB_VERSION) {
             $this->create_table();
+            update_option('bambu_php_db_version', self::DB_VERSION);
         }
     }
 
@@ -454,31 +606,38 @@ class BambuDashboardPHP {
         dbDelta($sql);
     }
 
-    /** Inserts one task row with INSERT IGNORE – returns true if newly inserted */
+    /** Upsert av én task – returnerer 'inserted' | 'updated' | 'unchanged' | 'skipped_running' | 'error' */
     private function insert_print(array $task, array $dev_info) {
         global $wpdb;
         $table = $wpdb->prefix . 'bambu_prints';
         $tid   = $task['id'] ?? null;
-        if (!$tid) return false;
+        if (!$tid) return 'error';
 
-        $did   = $task['deviceId'] ?? 'unknown';
-        $to_dt = function($v) {
-            if (!$v) return null;
-            $ts = (is_numeric($v) && abs($v) > 1e10) ? intdiv((int)$v, 1000) : strtotime((string)$v);
-            return ($ts && $ts > 0) ? gmdate('Y-m-d H:i:s', $ts) : null;
-        };
-        $start_dt = $to_dt($task['startTime'] ?? null);
-        $end_dt   = $to_dt($task['endTime']   ?? null);
+        $did      = (string)($task['deviceId'] ?? 'unknown');
+        $status   = (int)($task['status'] ?? 0);
+        $start_ts = $this->to_timestamp($task['startTime'] ?? null);
+        $end_ts   = $this->to_timestamp($task['endTime']   ?? null);
+
+        // Ikke lagre prints som tydelig fortsatt pågår – de fanges opp ved neste sync
+        if ($status === self::STATUS_RUNNING && (!$end_ts || $end_ts > time())) {
+            return 'skipped_running';
+        }
+
+        $start_dt = $start_ts ? gmdate('Y-m-d H:i:s', $start_ts) : null; // lagres i UTC
+        $end_dt   = $end_ts   ? gmdate('Y-m-d H:i:s', $end_ts)   : null;
         $s_ph     = $start_dt ? '%s' : 'NULL';
         $e_ph     = $end_dt   ? '%s' : 'NULL';
+
+        $name  = ($task['deviceName']  ?? '') ?: ($dev_info[$did]['name']  ?? $did);
+        $model = ($task['deviceModel'] ?? '') ?: ($dev_info[$did]['model'] ?? 'Ukjent');
 
         $args = [
             $tid,
             $did,
-            substr($task['deviceName']  ?? ($dev_info[$did]['name']  ?? $did), 0, 127),
-            substr($task['deviceModel'] ?? ($dev_info[$did]['model'] ?? 'Ukjent'), 0, 127),
-            substr($task['title']       ?? '', 0, 254),
-            (int)($task['status'] ?? 0),
+            mb_substr((string) $name, 0, 127),
+            mb_substr((string) $model, 0, 127),
+            mb_substr((string)($task['title'] ?? ''), 0, 254),
+            $status,
         ];
         if ($start_dt) $args[] = $start_dt;
         if ($end_dt)   $args[] = $end_dt;
@@ -488,25 +647,40 @@ class BambuDashboardPHP {
             (int)($task['costTime']   ?? 0)
         );
 
-        return $wpdb->query(
+        // Upsert: en print fanget midt i (eller med foreløpig status) oppdateres når den er ferdig.
+        // Navn/modell/tittel overskrives bare hvis lagret verdi er tom/plassholder.
+        $affected = $wpdb->query(
             $wpdb->prepare(
-                "INSERT IGNORE INTO `$table`
+                "INSERT INTO `$table`
                     (task_id, device_id, device_name, device_model, title, status,
                      start_time, end_time, weight_g, length_cm, cost_time_s)
-                 VALUES (%s, %s, %s, %s, %s, %d, $s_ph, $e_ph, %f, %f, %d)",
+                 VALUES (%s, %s, %s, %s, %s, %d, $s_ph, $e_ph, %f, %f, %d)
+                 ON DUPLICATE KEY UPDATE
+                    status       = VALUES(status),
+                    end_time     = COALESCE(VALUES(end_time), end_time),
+                    weight_g     = VALUES(weight_g),
+                    length_cm    = VALUES(length_cm),
+                    cost_time_s  = VALUES(cost_time_s),
+                    title        = IF(title = '', VALUES(title), title),
+                    device_name  = IF(device_name IN ('', device_id), VALUES(device_name), device_name),
+                    device_model = IF(device_model IN ('', 'Ukjent'), VALUES(device_model), device_model)",
                 ...$args
             )
-        ) === 1;
+        );
+        if ($affected === false) return 'error';
+        if ($affected === 1)     return 'inserted';
+        if ($affected >= 2)      return 'updated';
+        return 'unchanged';
     }
 
-    /** Returns per-device aggregated stats from the DB table */
-    private function get_stats_from_db() {
+    /** Returns per-device aggregated stats from the DB table (ekte navn/modell foretrekkes over plassholdere) */
+    private function get_stats_from_db(array $dev_info = []) {
         global $wpdb;
         $table = $wpdb->prefix . 'bambu_prints';
         $rows  = $wpdb->get_results(
             "SELECT device_id,
-                    MAX(device_name)  AS name,
-                    MAX(device_model) AS model,
+                    MAX(CASE WHEN device_name  NOT IN ('', device_id) THEN device_name  END) AS name,
+                    MAX(CASE WHEN device_model NOT IN ('', 'Ukjent')  THEN device_model END) AS model,
                     COUNT(*)          AS total_prints,
                     SUM(status = 2)   AS successful,
                     SUM(status != 2)  AS failed,
@@ -520,10 +694,14 @@ class BambuDashboardPHP {
             ARRAY_A
         );
         $stats = [];
-        foreach ($rows as $r) {
-            $stats[$r['device_id']] = [
-                'name'            => $r['name'],
-                'model'           => $r['model'],
+        foreach ((array) $rows as $r) {
+            $did = $r['device_id'];
+            $stats[$did] = [
+                // Ikke lenger koblet til kontoen. Kun når enhetslisten faktisk ble hentet,
+                // ellers ville alle printere blitt skjult ved en API-feil.
+                'removed'         => !empty($dev_info) && !isset($dev_info[$did]),
+                'name'            => $dev_info[$did]['name']  ?? ($r['name']  ?: $did),
+                'model'           => $r['model'] ?: ($dev_info[$did]['model'] ?? 'Ukjent'),
                 'total_prints'    => (int)$r['total_prints'],
                 'successful'      => (int)$r['successful'],
                 'failed'          => (int)$r['failed'],
@@ -546,9 +724,10 @@ class BambuDashboardPHP {
         register_rest_route('bambu/v1', '/stats',      array_merge(['methods' => 'GET', 'callback' => [$this, 'rest_stats']],     $public));
         register_rest_route('bambu/v1', '/prints',     array_merge(['methods' => 'GET', 'callback' => [$this, 'rest_prints']],    $public));
         register_rest_route('bambu/v1', '/export',     array_merge(['methods' => 'GET', 'callback' => [$this, 'rest_export']],    $public));
-        register_rest_route('bambu/v1', '/raw-sample', array_merge(['methods' => 'GET', 'callback' => [$this, 'rest_raw_sample']],$public));
-        register_rest_route('bambu/v1', '/recent',     array_merge(['methods' => 'GET', 'callback' => [$this, 'rest_recent']],    $public));
-        register_rest_route('bambu/v1', '/oldest',     array_merge(['methods' => 'GET', 'callback' => [$this, 'rest_oldest']],    $public));
+        // Feilsøkingsruter – kun for administratorer
+        register_rest_route('bambu/v1', '/raw-sample', array_merge(['methods' => 'GET', 'callback' => [$this, 'rest_raw_sample']],$admin));
+        register_rest_route('bambu/v1', '/recent',     array_merge(['methods' => 'GET', 'callback' => [$this, 'rest_recent']],    $admin));
+        register_rest_route('bambu/v1', '/oldest',     array_merge(['methods' => 'GET', 'callback' => [$this, 'rest_oldest']],    $admin));
         register_rest_route('bambu/v1', '/push-print', ['methods' => 'POST','callback' => [$this, 'rest_push_print'], 'permission_callback' => [$this, 'check_pi_key']]);
         register_rest_route('bambu/v1', '/cron-sync', ['methods' => 'GET', 'callback' => [$this, 'rest_cron_sync'],  'permission_callback' => '__return_true']);
         register_rest_route('bambu/v1', '/verify',     array_merge(['methods' => 'POST','callback' => [$this, 'rest_verify']],    $admin));
@@ -615,7 +794,14 @@ class BambuDashboardPHP {
             );
         }
 
-        $prints = array_map(function($r) {
+        // start_time/end_time er UTC ('Y-m-d H:i:s' uten tidssone).
+        // start_ts/end_ts er unix-sekunder (int|null) – bruk disse for lokal visning i JS.
+        $utc_ts = function($dt) {
+            if (!$dt) return null;
+            $ts = strtotime($dt . ' UTC');
+            return $ts ? (int) $ts : null;
+        };
+        $prints = array_map(function($r) use ($utc_ts) {
             return [
                 'task_id'      => $r['task_id'],
                 'device_id'    => $r['device_id'],
@@ -625,11 +811,13 @@ class BambuDashboardPHP {
                 'status'       => (int)$r['status'],
                 'start_time'   => $r['start_time'],
                 'end_time'     => $r['end_time'],
+                'start_ts'     => $utc_ts($r['start_time']),
+                'end_ts'       => $utc_ts($r['end_time']),
                 'weight_g'     => (float)$r['weight_g'],
                 'length_cm'    => (float)$r['length_cm'],
                 'cost_time_s'  => (int)$r['cost_time_s'],
             ];
-        }, $rows);
+        }, (array) $rows);
 
         return rest_ensure_response([
             'total'    => $total,
@@ -649,7 +837,7 @@ class BambuDashboardPHP {
 
         $rows   = [];
         $rows[] = ['Printer', 'Modell', 'Prints', 'Vellykket', 'Feilet', 'Suksessrate %', 'Printtid (timer)', 'Filament (g)', 'Filament (kg)', 'Lengde (m)', 'Lengde (km)'];
-        foreach ($stats['devices'] as $d) {
+        foreach ($stats['devices'] ?? [] as $d) {
             $rate   = $d['total_prints'] > 0 ? round($d['successful'] / $d['total_prints'] * 100, 1) : 0;
             $hours  = round($d['total_time_s'] / 3600, 1);
             $len_m  = round(($d['total_length_cm'] ?? 0) / 100, 1);
@@ -672,13 +860,18 @@ class BambuDashboardPHP {
         $out = '';
         foreach ($rows as $row) {
             $out .= implode(';', array_map(function($v) {
+                $v = (string) $v;
+                // Beskytt mot formel-injeksjon i Excel/Sheets (tall som -1.5 er trygge)
+                if ($v !== '' && !is_numeric($v) && strpbrk($v[0], "=+-@\t\r") !== false) {
+                    $v = "'" . $v;
+                }
                 return '"' . str_replace('"', '""', $v) . '"';
             }, $row)) . "\r\n";
         }
 
         // Send CSV direkte – omgår WP REST JSON-wrapping
         header('Content-Type: text/csv; charset=utf-8');
-        header('Content-Disposition: attachment; filename="bambu-stats-' . date('Y-m-d') . '.csv"');
+        header('Content-Disposition: attachment; filename="bambu-stats-' . wp_date('Y-m-d') . '.csv"');
         header('Cache-Control: no-cache');
         echo "\xEF\xBB\xBF"; // UTF-8 BOM for Excel
         echo $out;
@@ -706,17 +899,17 @@ class BambuDashboardPHP {
         $total = $first['total'];
         if (empty($first['hits'])) return rest_ensure_response(['error' => 'Ingen tasks funnet']);
 
-        // Bla gjennom til siste side
-        $after = null;
-        $last_hits = $first['hits'];
+        // Bla gjennom til siste side – med tak på tid og antall sider
+        $last_hits     = $first['hits'];
         $pages_fetched = 1;
-        while (true) {
+        $deadline      = microtime(true) + 25;
+        while ($pages_fetched < 200 && microtime(true) < $deadline) {
             $next_after = end($last_hits)['id'] ?? null;
             if (!$next_after) break;
             $page = $this->fetch_task_page($next_after);
             if (empty($page['hits'])) break;
             // Loop-deteksjon
-            if ($page['hits'][0]['id'] === $last_hits[0]['id']) break;
+            if (($page['hits'][0]['id'] ?? null) === ($last_hits[0]['id'] ?? null)) break;
             $last_hits = $page['hits'];
             $pages_fetched++;
             if (count($page['hits']) < 100) break;
@@ -731,7 +924,7 @@ class BambuDashboardPHP {
                 'printer'  => $oldest['deviceName']  ?? $oldest['deviceId'] ?? '?',
                 'model'    => $oldest['deviceModel'] ?? '?',
                 'title'    => $oldest['title']       ?? '',
-                'status'   => $oldest['status'] === 2 ? 'Fullført' : 'Feilet/Annet',
+                'status'   => ($oldest['status'] ?? null) === 2 ? 'Fullført' : 'Feilet/Annet',
                 'start'    => $oldest['startTime']   ?? '',
                 'end'      => $oldest['endTime']     ?? '',
                 'duration' => intdiv($cost_s, 3600) . 't ' . intdiv($cost_s % 3600, 60) . 'm',
@@ -757,7 +950,7 @@ class BambuDashboardPHP {
                 'printer'    => $t['deviceName']  ?? $t['deviceId'] ?? '?',
                 'model'      => $t['deviceModel'] ?? '?',
                 'title'      => $t['title']       ?? '',
-                'status'     => $t['status'] === 2 ? 'Fullført' : ($t['status'] === 3 ? 'Feilet' : 'Ukjent (' . $t['status'] . ')'),
+                'status'     => ($t['status'] ?? null) === 2 ? 'Fullført' : (($t['status'] ?? null) === 3 ? 'Feilet' : 'Ukjent (' . ($t['status'] ?? '?') . ')'),
                 'start'      => $start,
                 'end'        => $end,
                 'duration'   => $h . 't ' . $m . 'm  (costTime=' . $cost_s . 's)',
@@ -796,21 +989,26 @@ class BambuDashboardPHP {
         if ($_SERVER['REQUEST_METHOD'] === 'POST' && check_admin_referer('bambu_php_settings')) {
 
             if (isset($_POST['bambu_php_dash_link_url'])) {
-                update_option('bambu_php_dash_link_url',    esc_url_raw($_POST['bambu_php_dash_link_url']));
-                update_option('bambu_php_dash_link_label',  sanitize_text_field($_POST['bambu_php_dash_link_label']));
-                update_option('bambu_php_stats_link_url',   esc_url_raw($_POST['bambu_php_stats_link_url']));
-                update_option('bambu_php_stats_link_label', sanitize_text_field($_POST['bambu_php_stats_link_label']));
+                $in = wp_unslash($_POST);
+                update_option('bambu_php_dash_link_url',    esc_url_raw($in['bambu_php_dash_link_url'] ?? ''));
+                update_option('bambu_php_dash_link_label',  sanitize_text_field($in['bambu_php_dash_link_label'] ?? ''));
+                update_option('bambu_php_stats_link_url',   esc_url_raw($in['bambu_php_stats_link_url'] ?? ''));
+                update_option('bambu_php_stats_link_label', sanitize_text_field($in['bambu_php_stats_link_label'] ?? ''));
                 echo '<div class="notice notice-success"><p>✅ Lenker lagret.</p></div>';
             }
 
             if (isset($_POST['bambu_php_email'])) {
-                update_option('bambu_php_email', sanitize_email($_POST['bambu_php_email']));
-                if (!empty($_POST['bambu_php_password'])) {
-                    update_option('bambu_php_password', sanitize_text_field($_POST['bambu_php_password']));
+                update_option('bambu_php_email', sanitize_email(wp_unslash($_POST['bambu_php_email'])));
+                // Passord: kun wp_unslash – sanitize_text_field ville ødelagt passord med spesialtegn
+                $password = wp_unslash($_POST['bambu_php_password'] ?? '');
+                if ($password !== '') {
+                    update_option('bambu_php_password', $password);
                 }
                 delete_transient('bambu_php_status');
-                delete_transient('bambu_php_today');
-                delete_transient('bambu_php_stats');
+                delete_transient('bambu_php_today_tasks');
+                delete_transient('bambu_php_stats_v2');
+                delete_transient('bambu_php_devinfo');
+                delete_transient('bambu_php_login_throttle');
                 // NB: hist_stats slettes IKKE – akkumulert historikk bevares ved ny innlogging
 
                 $result = $this->do_login();
@@ -822,8 +1020,18 @@ class BambuDashboardPHP {
                 }
             }
 
+            if (isset($_POST['bambu_resend_code'])) {
+                update_option('bambu_php_needs_verify', true);
+                $result = $this->send_verify_code();
+                if (is_wp_error($result)) {
+                    echo '<div class="notice notice-error"><p>' . esc_html($result->get_error_message()) . '</p></div>';
+                } else {
+                    echo '<div class="notice notice-success"><p>✅ Ny kode sendt til ' . esc_html(get_option('bambu_php_email')) . ' – sjekk innboksen og søppelpost.</p></div>';
+                }
+            }
+
             if (!empty($_POST['bambu_verify_code'])) {
-                $code   = sanitize_text_field($_POST['bambu_verify_code']);
+                $code   = sanitize_text_field(wp_unslash($_POST['bambu_verify_code']));
                 $result = $this->do_verify($code);
                 if (is_wp_error($result)) {
                     echo '<div class="notice notice-error"><p>Feil: ' . esc_html($result->get_error_message()) . '</p></div>';
@@ -834,8 +1042,8 @@ class BambuDashboardPHP {
 
             if (isset($_POST['bambu_reset_cache'])) {
                 // Myk reset: fjern bare transient, behold akkumulert historikk
-                delete_transient('bambu_php_stats');
-                delete_transient('bambu_php_today');
+                delete_transient('bambu_php_stats_v2');
+                delete_transient('bambu_php_today_tasks');
                 delete_transient('bambu_php_status');
                 // Marker historikken som ikke-komplett så nye tasks hentes på nytt,
                 // men behold alle aggregerte tall vi allerede har
@@ -857,8 +1065,8 @@ class BambuDashboardPHP {
 
             if (isset($_POST['bambu_wipe_history'])) {
                 // Hard reset: slett ALT inkl. akkumulert historikk og DB-tabellen
-                delete_transient('bambu_php_stats');
-                delete_transient('bambu_php_today');
+                delete_transient('bambu_php_stats_v2');
+                delete_transient('bambu_php_today_tasks');
                 delete_transient('bambu_php_status');
                 delete_option('bambu_php_hist_stats');
                 global $wpdb;
@@ -949,6 +1157,12 @@ class BambuDashboardPHP {
             </form>
             <?php endif; ?>
 
+            <form method="post" style="margin-top:.5rem">
+                <?php wp_nonce_field('bambu_php_settings'); ?>
+                <input type="hidden" name="bambu_resend_code" value="1" />
+                <?php submit_button('Send ny verifiseringskode', 'secondary', 'submit', false); ?>
+            </form>
+
             <hr>
             <h2>Statistikk-cache</h2>
             <?php
@@ -958,7 +1172,7 @@ class BambuDashboardPHP {
             ?>
             <p>
                 Lagrede historiske prints: <strong><?= number_format($cached_tasks) ?></strong>
-                · Status: <strong><?= $hist ? ($hist['complete'] ? '✅ Komplett' : '⏳ Laster...') : '–' ?></strong>
+                · Status: <strong><?= $hist ? (!empty($hist['complete']) ? '✅ Komplett' : '⏳ Laster...') : '–' ?></strong>
                 <?php if ($hist && !empty($hist['api_total'])): ?>
                 · Bambu rapporterer totalt: <strong><?= number_format($hist['api_total']) ?></strong>
                 <?php endif; ?>
@@ -1037,31 +1251,46 @@ class BambuDashboardPHP {
         global $post;
         if (!$post) return;
         if (!has_shortcode($post->post_content, 'bambu_dashboard') &&
-            !has_shortcode($post->post_content, 'bambu_stats')) return;
+            !has_shortcode($post->post_content, 'bambu_stats') &&
+            !$this->uses_fullscreen_template($post)) return;
 
         wp_enqueue_style('bambu-php-css',
-            plugin_dir_url(__FILE__) . 'assets/bambu-dashboard.css', [], '1.0.0');
+            plugin_dir_url(__FILE__) . 'assets/bambu-dashboard.css', [], $this->asset_version('assets/bambu-dashboard.css'));
 
         wp_enqueue_script('bambu-php-js',
-            plugin_dir_url(__FILE__) . 'assets/bambu-dashboard.js', [], '1.0.0', true);
+            plugin_dir_url(__FILE__) . 'assets/bambu-dashboard.js', [], $this->asset_version('assets/bambu-dashboard.js'), true);
 
+        // Råverdier: JS bruker textContent/href, så esc_html her ville gitt dobbel escaping.
+        // restBase er full namespace-URL (f.eks. https://x/wp-json/bambu/v1 eller
+        // https://x/?rest_route=/bambu/v1 ved enkle permalenker). JS bør bygge URL-er som
+        // restBase + '/stats' og legge til query-parametre med URL/URLSearchParams
+        // (bruk '&' hvis URL-en allerede har '?'), ikke ved å lime på '?…' direkte.
         wp_localize_script('bambu-php-js', 'bambuConfig', [
-            'restUrl'   => rest_url(''),
+            'restUrl'   => esc_url_raw(rest_url('')),
+            'restBase'  => esc_url_raw(rest_url('bambu/v1')),
             'theme'     => 'auto',
             'php_mode'  => true,
-            'dashLinkUrl'   => esc_url(get_option('bambu_php_dash_link_url', '')),
-            'dashLinkLabel' => esc_html(get_option('bambu_php_dash_link_label', '')),
-            'statsLinkUrl'  => esc_url(get_option('bambu_php_stats_link_url', '')),
-            'statsLinkLabel'=> esc_html(get_option('bambu_php_stats_link_label', '')),
+            'version'   => self::VERSION,
+            'dashLinkUrl'   => esc_url_raw(get_option('bambu_php_dash_link_url', '')),
+            'dashLinkLabel' => (string) get_option('bambu_php_dash_link_label', ''),
+            'statsLinkUrl'  => esc_url_raw(get_option('bambu_php_stats_link_url', '')),
+            'statsLinkLabel'=> (string) get_option('bambu_php_stats_link_label', ''),
         ]);
     }
 
+    /** Asset-versjon: filmtime når tilgjengelig (cache-busting), ellers plugin-versjon */
+    private function asset_version($rel) {
+        $path = plugin_dir_path(__FILE__) . $rel;
+        $mtime = file_exists($path) ? filemtime($path) : false;
+        return $mtime ? (string) $mtime : self::VERSION;
+    }
+
     public function dashboard_shortcode($atts) {
-        $atts = shortcode_atts(['theme' => '', 'cols' => '5', 'auto' => 'true'], $atts);
+        $atts = shortcode_atts(['theme' => '', 'cols' => '5', 'auto' => 'true', 'demo' => 'false'], $atts);
         $cls  = $atts['theme'] === 'dark' ? 'bambu-dark' : ($atts['theme'] === 'light' ? 'bambu-light' : '');
         return sprintf(
-            '<div id="bambu-dashboard" class="bambu-wrap %s" data-cols="%s" data-auto="%s"><div class="bambu-loading">Laster 3D-print dashboard...</div></div>',
-            esc_attr($cls), esc_attr($atts['cols']), esc_attr($atts['auto'])
+            '<div id="bambu-dashboard" class="bambu-wrap %s" data-cols="%s" data-auto="%s" data-demo="%s"><div class="bambu-loading">Laster 3D-print dashboard...</div></div>',
+            esc_attr($cls), esc_attr($atts['cols']), esc_attr($atts['auto']), $atts['demo'] === 'true' ? 'true' : 'false'
         );
     }
 
@@ -1074,5 +1303,8 @@ class BambuDashboardPHP {
         );
     }
 }
+
+register_activation_hook(__FILE__,   ['BambuDashboardPHP', 'activate']);
+register_deactivation_hook(__FILE__, ['BambuDashboardPHP', 'deactivate']);
 
 BambuDashboardPHP::instance();

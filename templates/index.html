@@ -1,1078 +1,893 @@
-<!-- VERSJON-TEST-2026 -->
 <!DOCTYPE html>
-<html lang="no">
+<html lang="no" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>3D-print status – Makerspace Ringebu</title>
+  <script>
+    // Sett tema før første maling, så det ikke blinker lyst → mørkt.
+    try { if (localStorage.getItem('theme') === 'light') document.documentElement.dataset.theme = 'light'; } catch (e) {}
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Jura:wght@400;600;800&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='hud.css') }}?v=4" />
   <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    /* ── Layout ─────────────────────────────────────────────── */
+    main { padding: 1rem 1.25rem 1.25rem; }
 
-    :root {
-      --orange: #d96c00;
-      --dark:   #1a1b1f;
-      --gray:   #f1f1f3;
-      --mid:    #e0e0e3;
-      --white:  #ffffff;
-      --green:  #2ecc71;
-      --red:    #e74c3c;
-      --blue:   #3498db;
-      --card-bg: #ffffff;
-      --body-bg: #f1f1f3;
-      --text:    #1a1b1f;
-      --text-bold: #000000;
-      --text-muted: #888;
-      --text-faint: #bbb;
-      --header-bg: #1a1b1f;
-      --shadow: rgba(0,0,0,.08);
-    }
-
-    html.dark {
-      --card-bg: #2a2b30;
-      --body-bg: #18191d;
-      --text:    #e8e8ec;
-      --text-bold: #ffffff;
-      --text-muted: #999;
-      --text-faint: #555;
-      --header-bg: #111215;
-      --mid:     #3a3b40;
-      --shadow:  rgba(0,0,0,.3);
-      --gray:    #222328;
-    }
-
-    body {
-      font-family: 'Jura', -apple-system, BlinkMacSystemFont, sans-serif;
-      background: var(--body-bg);
-      color: var(--text);
-      min-height: 100vh;
-      transition: background .3s, color .3s;
-    }
-
-    /* ── Header ── */
-    header {
-      background: var(--header-bg);
-      padding: 0 2rem;
-      display: flex;
-      align-items: center;
-      height: 70px;
-      position: sticky;
-      top: 0;
-      z-index: 100;
-      box-shadow: 0 2px 8px rgba(0,0,0,.4);
-      gap: 1rem;
-    }
-
-    header img { height: 36px; filter: brightness(0) invert(1); flex-shrink: 0; }
-
-    .header-center {
-      flex: 1;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 0.6rem;
-    }
-
-    .header-stat {
-      display: flex;
-      align-items: center;
-      gap: 0.3rem;
-      color: rgba(255,255,255,0.6);
-      font-size: 0.78rem;
-      font-weight: 600;
-    }
-
-    .header-stat-value {
-      color: #fff;
-      font-weight: 800;
-      font-size: 1rem;
-    }
-
-    .header-stat-value.orange { color: var(--orange); }
-    .header-stat-value.red { color: var(--red); }
-
-    .header-stat-sep {
-      width: 1px;
-      height: 18px;
-      background: rgba(255,255,255,0.15);
-      margin: 0 0.2rem;
-    }
-
-    .header-right {
-      display: flex;
-      align-items: center;
-      gap: 0.8rem;
-    }
-
-    .header-title {
-      color: var(--white);
-      font-size: 1rem;
-      font-weight: 600;
-      opacity: 0.7;
-      letter-spacing: 0.03em;
-    }
-
-    .last-updated {
-      font-size: 0.78rem;
-      color: rgba(255,255,255,0.45);
-      font-weight: 400;
-    }
-
-    .pulse-dot {
-      width: 10px; height: 10px;
-      border-radius: 50%;
-      background: var(--green);
-      animation: pulse 2s infinite;
-    }
-
-    @keyframes pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50%       { opacity: 0.5; transform: scale(0.85); }
-    }
-
-    /* ── Header buttons ── */
-    .hdr-btn {
-      background: rgba(255,255,255,0.1);
-      border: none;
-      color: rgba(255,255,255,0.6);
-      width: 32px; height: 32px;
-      border-radius: 6px;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: background .2s, color .2s;
-      font-size: 0.85rem;
-    }
-    .hdr-btn:hover { background: rgba(255,255,255,0.2); color: #fff; }
-    .hdr-btn.active { background: var(--orange); color: #fff; }
-
-    /* ── Fullscreen ── */
-    :fullscreen header { display: none; }
-    :fullscreen main { padding-top: 1rem; }
-
-    /* ── Main ── */
-    main {
-      max-width: none;
-      margin: 0 auto;
-      padding: 1rem 0.75rem;
-    }
-
-    .section-title {
-      font-size: 0.75rem;
-      font-weight: 800;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: var(--orange);
-      margin-bottom: 1.2rem;
-    }
-
-    /* ── Grid ── */
     .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+      gap: var(--gap);
+    }
+
+    /* Tilpass-til-skjerm (kiosk): alt skal synes uten scrolling */
+    body.fit { height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+    body.fit main { flex: 1; min-height: 0; padding: 0.75rem; display: flex; flex-direction: column; }
+    body.fit .grid {
+      flex: 1;
+      min-height: 0;
       display: flex;
       flex-wrap: wrap;
-      gap: 0.75rem;
+      align-content: center;
       justify-content: center;
+      gap: var(--gap);
     }
+    body.fit .card { width: var(--card-w, 280px); height: var(--card-h, 340px); }
+    body.fit .card-visual { flex: 1 1 0; height: auto; min-height: 0; }
 
-    .grid > .card {
-      width: calc((100% - 4 * 0.75rem) / 5);
-      min-width: 160px;
-      flex-shrink: 0;
-    }
-
-    /* ── Fit-to-screen mode ── */
-    body.fit-screen {
-      height: 100vh;
-      overflow: hidden;
-      display: flex;
-      flex-direction: column;
-    }
-
-    body.fit-screen main {
-      flex: 1;
-      max-width: none;
-      display: flex;
-      flex-direction: column;
-      padding: 0.3rem 0.4rem;
-      overflow: hidden;
-    }
-
-    body.fit-screen .summary { display: none; }
-    body.fit-screen .section-title { margin-bottom: 0.4rem; flex-shrink: 0; }
-    body.fit-screen .grid {
-      flex: 1;
-      align-content: start;
-      gap: 0.4rem;
-      justify-content: center;
-      zoom: 1.25;
-    }
-    body.fit-screen .card { min-height: 175px; }
-    body.fit-screen footer { display: none; }
-
-    /* Kompakte kort i fit-screen */
-    body.fit-screen .card-header { padding: 0.35rem 0.6rem 0.2rem; }
-    body.fit-screen .card-name { font-size: 0.82rem; }
-    body.fit-screen .badge { font-size: 0.55rem; padding: 2px 5px; }
-    body.fit-screen .card-body { padding: 0 0.6rem 0.35rem; }
-    body.fit-screen .thumb-wrap { padding: 0 0.4rem; margin-bottom: 0.2rem; }
-    body.fit-screen .thumb-wrap img { max-height: 65px; }
-    body.fit-screen .progress-pct { font-size: 1rem; margin-bottom: 0.1rem; }
-    body.fit-screen .time-row { font-size: 0.65rem; padding: 0.1rem 0; margin-top: 0.1rem; }
-    body.fit-screen .time-finish { font-size: 0.72rem; }
-    body.fit-screen .idle-msg { font-size: 0.65rem; padding: 0.15rem 0; }
-
-    /* Dynamiske kolonner */
-    .grid.cols-5 {
-      grid-template-columns: repeat(5, minmax(0, 1fr));
-      justify-items: center;
-    }
-
-    /* Sentrere siste rad med flexbox-wrapper */
-    .grid.cols-5 {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.4rem;
-      justify-content: center;
-    }
-
-    .grid.cols-5 > .card {
-      width: calc((100% - 4 * 0.4rem) / 5);
-      min-width: 0;
-    }
-
-    /* ── Card ── */
+    /* ── Printerkort ────────────────────────────────────────── */
     .card {
-      background: var(--card-bg);
-      border-radius: 12px;
+      --accent: var(--grey);
+      --accent-rgb: 93, 103, 128;
+      container-type: inline-size;
+      display: flex;
+      flex-direction: column;
       overflow: hidden;
-      box-shadow: 0 1px 4px var(--shadow);
-      transition: box-shadow .2s, background .3s;
-      position: relative;
-      min-height: 260px;
+      min-width: 0;
+      transition: border-color .4s;
     }
+    .card[data-state="printing"] { --accent: var(--orange); --accent-rgb: 255, 122, 26; }
+    .card[data-state="paused"]   { --accent: var(--amber);  --accent-rgb: 255, 194, 61; }
+    .card[data-state="failed"]   { --accent: var(--red);    --accent-rgb: 255, 61, 94; border-color: rgba(255, 61, 94, 0.55); }
+    .card[data-state="done"]     { --accent: var(--green);  --accent-rgb: 45, 252, 155; border-color: rgba(45, 252, 155, 0.4); }
+    .card[data-state="idle"]     { --accent: var(--cyan);   --accent-rgb: 47, 216, 255; }
+    .card[data-state="offline"]  { opacity: 0.62; }
 
-    .card-header {
-      background: #999;
-    }
-    .card.printing  .card-header { background: var(--orange); }
-    .card.online    .card-header { background: var(--green); }
-    .card.offline   .card-header { background: #999; opacity: .9; }
-    .card.failed    .card-header { background: var(--red); animation: card-blink-header 1.5s ease-in-out infinite; }
-    .card.paused    .card-header { background: #f39c12; animation: card-blink-header-warn 2s ease-in-out infinite; }
-    .card.just-done .card-header { background: var(--green); }
-
-    @keyframes card-blink-header {
-      0%, 100% { opacity: 1; }
-      50%      { opacity: 0.6; }
-    }
-    @keyframes card-blink-header-warn {
-      0%, 100% { opacity: 1; }
-      50%      { opacity: 0.65; }
-    }
-
-    /* ── Background progress fill ── */
-    .card-progress-bg {
+    /* Fremdrift som svak fylling bak hele kortet */
+    .card-fill {
       position: absolute;
-      top: 0; left: 0;
-      height: 100%;
-      transition: width 4.8s linear;
-      z-index: 0;
+      inset: 0;
+      transform-origin: left center;
+      transform: scaleX(0);
+      background: linear-gradient(90deg, rgba(var(--accent-rgb), 0.01), rgba(var(--accent-rgb), 0.065));
+      border-right: 1px solid rgba(var(--accent-rgb), 0.35);
+      transition: transform 4.5s linear, opacity .4s;
+      pointer-events: none;
+      opacity: 0;
     }
+    .card.has-job .card-fill { opacity: 1; }
 
-    .card.printing .card-progress-bg {
-      background-image: linear-gradient(
-        -45deg,
-        rgba(217,108,0,0.22) 25%, rgba(255,152,0,0.12) 25%,
-        rgba(255,152,0,0.12) 50%, rgba(217,108,0,0.22) 50%,
-        rgba(217,108,0,0.22) 75%, rgba(255,152,0,0.12) 75%
-      );
-      background-size: 40px 40px;
-      animation: zebra-move 1.5s linear infinite;
+    /* Pulserende glød for feil / ferdig */
+    .card-alert {
+      position: absolute;
+      inset: -1px;
+      border-radius: inherit;
+      box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.7), 0 0 28px rgba(var(--accent-rgb), 0.35), inset 0 0 26px rgba(var(--accent-rgb), 0.12);
+      opacity: 0;
+      pointer-events: none;
     }
+    .card[data-state="failed"] .card-alert { animation: alert-pulse 1.4s ease-in-out infinite; }
+    .card[data-state="done"]   .card-alert { animation: alert-pulse 2.4s ease-in-out infinite; }
+    @keyframes alert-pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
 
-    .card.failed .card-progress-bg {
-      background-image: linear-gradient(
-        -45deg,
-        rgba(231,76,60,0.2) 25%, rgba(231,76,60,0.1) 25%,
-        rgba(231,76,60,0.1) 50%, rgba(231,76,60,0.2) 50%,
-        rgba(231,76,60,0.2) 75%, rgba(231,76,60,0.1) 75%
-      );
-      background-size: 40px 40px;
-    }
+    .card > *:not(.card-fill):not(.card-alert) { position: relative; z-index: 1; }
 
-    .card.paused .card-progress-bg {
-      background-image: linear-gradient(
-        -45deg,
-        rgba(243,156,18,0.2) 25%, rgba(243,156,18,0.1) 25%,
-        rgba(243,156,18,0.1) 50%, rgba(243,156,18,0.2) 50%,
-        rgba(243,156,18,0.2) 75%, rgba(243,156,18,0.1) 75%
-      );
-      background-size: 40px 40px;
-    }
-
-    .card.just-done .card-progress-bg {
-      width: 100% !important;
-      background: rgba(46,204,113,0.15);
-      animation: done-pulse 2s ease-in-out infinite;
-    }
-
-    html.dark .card.printing .card-progress-bg {
-      background-image: linear-gradient(
-        -45deg,
-        rgba(217,108,0,0.28) 25%, rgba(255,152,0,0.15) 25%,
-        rgba(255,152,0,0.15) 50%, rgba(217,108,0,0.28) 50%,
-        rgba(217,108,0,0.28) 75%, rgba(255,152,0,0.15) 75%
-      );
-      background-size: 40px 40px;
-      animation: zebra-move 1.5s linear infinite;
-    }
-
-    html.dark .card.failed .card-progress-bg {
-      background-image: linear-gradient(
-        -45deg,
-        rgba(231,76,60,0.25) 25%, rgba(231,76,60,0.12) 25%,
-        rgba(231,76,60,0.12) 50%, rgba(231,76,60,0.25) 50%,
-        rgba(231,76,60,0.25) 75%, rgba(231,76,60,0.12) 75%
-      );
-      background-size: 40px 40px;
-    }
-
-    html.dark .card.paused .card-progress-bg {
-      background-image: linear-gradient(
-        -45deg,
-        rgba(243,156,18,0.25) 25%, rgba(243,156,18,0.12) 25%,
-        rgba(243,156,18,0.12) 50%, rgba(243,156,18,0.25) 50%,
-        rgba(243,156,18,0.25) 75%, rgba(243,156,18,0.12) 75%
-      );
-      background-size: 40px 40px;
-    }
-
-    html.dark .card.just-done .card-progress-bg {
-      background: rgba(46,204,113,0.2);
-    }
-
-    @keyframes zebra-move {
-      0%   { background-position: 0 0; }
-      100% { background-position: 40px 40px; }
-    }
-
-    @keyframes done-pulse {
-      0%, 100% { opacity: 0.6; }
-      50%      { opacity: 1; }
-    }
-
-    @keyframes card-blink {
-      0%, 100% { box-shadow: 0 1px 4px var(--shadow); }
-      50%      { box-shadow: 0 0 20px rgba(231, 76, 60, 0.4); }
-    }
-
-    @keyframes card-blink-warn {
-      0%, 100% { box-shadow: 0 1px 4px var(--shadow); }
-      50%      { box-shadow: 0 0 16px rgba(243, 156, 18, 0.3); }
-    }
-
-    .card:hover { box-shadow: 0 4px 16px rgba(0,0,0,.12); }
-
-    .card-header {
-      padding: 0.6rem 1rem 0.5rem;
+    .card-head {
       display: flex;
       align-items: flex-start;
       justify-content: space-between;
       gap: 0.5rem;
-      position: relative;
-      z-index: 1;
+      padding: 0.8rem 0.9rem 0.4rem;
     }
-
-    .card-name { font-size: 1rem; font-weight: 800; line-height: 1.2; flex: 1; color: #fff; }
-    .card-model { font-size: 0.72rem; color: var(--text-muted); font-weight: 400; margin-top: 2px; }
-
-    /* ── Status badge ── */
-    .badge {
-      font-size: 0.68rem; font-weight: 600; letter-spacing: 0.07em;
-      text-transform: uppercase; padding: 3px 9px; border-radius: 20px; white-space: nowrap;
-    }
-    .badge-printing { background: rgba(0,0,0,0.25); color: #fff; }
-    .badge-online   { background: rgba(0,0,0,0.2); color: #fff; }
-    .badge-offline  { background: rgba(0,0,0,0.2); color: #fff; }
-    .badge-idle     { background: rgba(0,0,0,0.2); color: #fff; }
-    .badge-done     { background: rgba(0,0,0,0.2); color: #fff; }
-
-    /* ── Thumbnail ── */
-    .thumb-wrap { padding: 0 1.25rem; margin-bottom: 0.75rem; position: relative; z-index: 1; }
-    .thumb-wrap img {
-      width: 100%; max-height: 160px; object-fit: contain; border-radius: 8px;
-      mix-blend-mode: multiply;
-    }
-    html.dark .thumb-wrap img {
-      mix-blend-mode: screen;
-      filter: brightness(0.9);
-    }
-
-    /* ── Job info ── */
-    .card-body { padding: 0 1.25rem 1.25rem; position: relative; z-index: 1; }
-    .job-name {
-      font-size: 0.85rem; font-weight: 600; margin-bottom: 0.6rem;
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text);
-    }
-    .job-name span { color: var(--text-muted); font-weight: 400; }
-
-    /* ── Progress percentage ── */
-    .progress-pct {
-      font-size: 1.4rem;
-      font-weight: 800;
-      color: var(--orange);
-      margin-bottom: 0.3rem;
-    }
-
-    /* ── Info row (temp, layer, speed) ── */
-    .info-row { display: flex; gap: 1rem; font-size: 0.72rem; color: var(--text-muted); margin-top: 0.5rem; flex-wrap: wrap; }
-    .info-item { display: flex; align-items: center; gap: 3px; }
-    .info-item svg { flex-shrink: 0; }
-
-    /* ── Time remaining ── */
-    .time-row {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-size: 0.9rem;
+    .card-id { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+    .card-name {
+      font-size: 1.05rem;
+      font-size: clamp(0.85rem, 6.2cqi, 1.35rem);
       font-weight: 700;
-      color: var(--text-bold);
-      margin-top: 0.4rem;
-      padding: 0.3rem 0;
-    }
-    .time-row svg { flex-shrink: 0; color: var(--orange); }
-    .time-finish { font-weight: 800; font-size: 1rem; }
-
-    /* ── Idle / offline message ── */
-    .idle-msg { font-size: 0.82rem; color: var(--text-faint); font-style: italic; padding: 0.5rem 0; }
-
-    /* ── Error banner ── */
-    .error-banner {
-      background: #fdecea; border: 1px solid #f5c6cb; border-radius: 8px;
-      padding: 0.9rem 1.25rem; color: #c0392b; font-size: 0.85rem; margin-bottom: 1.5rem; display: none;
-    }
-    html.dark .error-banner { background: rgba(231,76,60,0.15); border-color: rgba(231,76,60,0.3); }
-
-    /* ── Verify code form ── */
-    .verify-form {
-      background: var(--card-bg); border-radius: 12px; padding: 2rem;
-      max-width: 420px; margin: 0 auto 2rem; box-shadow: 0 2px 12px var(--shadow);
-      text-align: center; display: none;
-    }
-    .verify-form h2 { font-size: 1.1rem; font-weight: 800; margin-bottom: 0.5rem; color: var(--text); }
-    .verify-form p { font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1.2rem; }
-    .verify-input {
-      font-family: 'Jura', monospace; font-size: 1.5rem; font-weight: 800; letter-spacing: 0.5em;
-      text-align: center; border: 2px solid var(--mid); border-radius: 8px; padding: 0.6rem 1rem;
-      width: 200px; outline: none; transition: border-color .2s; background: var(--card-bg); color: var(--text);
-    }
-    .verify-input:focus { border-color: var(--orange); }
-    .verify-btn {
-      display: inline-block; margin-top: 1rem; padding: 0.6rem 2rem; background: var(--orange);
-      color: var(--white); border: none; border-radius: 8px; font-family: 'Jura', sans-serif;
-      font-size: 0.9rem; font-weight: 700; cursor: pointer; transition: background .2s;
-    }
-    .verify-btn:hover { background: #b85c00; }
-    .verify-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .verify-error { color: var(--red); font-size: 0.8rem; margin-top: 0.75rem; display: none; }
-
-    /* ── Summary bar (hidden, moved to header) ── */
-    .summary { display: none; }
-
-    /* ── Empty state ── */
-    .empty { text-align: center; padding: 4rem 1rem; color: var(--text-faint); font-size: 0.95rem; }
-
-    /* ── Today bar ── */
-    .today-bar {
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      gap: 3rem;
-      padding: 1rem 2rem;
-      margin: 0;
-      background: var(--card-bg);
-      border-top: 1px solid var(--mid);
-      transition: background .3s;
-    }
-
-    body.fit-screen .today-bar {
-      padding: 0.3rem 1rem;
-      flex-shrink: 0;
-    }
-
-    .today-item {
-      display: flex;
-      align-items: baseline;
-      gap: 0.4rem;
-    }
-
-    .today-label {
-      font-size: 0.7rem;
-      font-weight: 600;
+      letter-spacing: 0.06em;
       text-transform: uppercase;
-      letter-spacing: 0.1em;
-      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .card-model {
+      font-family: var(--font-mono);
+      font-size: 0.64rem;
+      letter-spacing: 0.08em;
+      color: var(--text-faint);
+      text-transform: uppercase;
     }
 
-    .today-value {
-      font-size: 1.8rem;
-      font-weight: 800;
+    .chip {
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.24rem 0.55rem;
+      border-radius: 999px;
+      border: 1px solid rgba(var(--accent-rgb), 0.45);
+      background: rgba(var(--accent-rgb), 0.1);
+      color: var(--accent);
+      font-size: 0.62rem;
+      font-weight: 700;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .chip i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+    .card[data-state="printing"] .chip i { animation: hud-pulse 1.6s ease-in-out infinite; }
+    .card[data-state="offline"] .chip i { box-shadow: none; }
+
+    /* Forhåndsvisning – "hologram" */
+    .card-visual {
+      height: 140px;
+      margin: 0.2rem 0.9rem 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      border-radius: var(--radius-sm);
+      background:
+        radial-gradient(60% 55% at 50% 78%, rgba(var(--accent-rgb), 0.08), transparent 70%),
+        linear-gradient(rgba(var(--accent-rgb), 0.035) 1px, transparent 1px) 0 0 / 100% 12px;
+      border: 1px solid var(--line);
+    }
+    .thumb {
+      max-width: 88%;
+      max-height: 92%;
+      object-fit: contain;
+      filter: drop-shadow(0 6px 16px rgba(var(--accent-rgb), 0.18));
+      transition: opacity .5s, filter .5s;
+    }
+    .card:not(.has-job):not([data-state="done"]) .thumb { opacity: 0.32; filter: grayscale(1); }
+    .card.has-thumb .placeholder { display: none; }
+    .placeholder { width: 34%; max-width: 74px; height: auto; color: rgba(var(--accent-rgb), 0.55); }
+
+    .card-job {
+      margin: 0.55rem 0.9rem 0;
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      color: var(--text-dim);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .card-main { padding: 0.45rem 0.9rem 0.2rem; }
+    .readout { display: flex; align-items: flex-end; justify-content: space-between; gap: 0.5rem; min-height: 2.6rem; }
+    .pct {
+      font-family: var(--font-mono);
+      font-size: 2.1rem;
+      font-size: clamp(1.4rem, 13cqi, 3rem);
+      font-weight: 700;
+      line-height: 1;
+      color: var(--accent);
+      text-shadow: 0 0 18px rgba(var(--accent-rgb), 0.22);
+      letter-spacing: -0.02em;
+    }
+    .pct small { font-size: 0.45em; margin-left: 2px; opacity: 0.7; }
+    .state-msg {
+      font-size: 1.2rem;
+      font-size: clamp(0.9rem, 7.5cqi, 1.7rem);
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--accent);
+      line-height: 1.1;
+    }
+    .card[data-state="idle"] .state-msg,
+    .card[data-state="offline"] .state-msg { color: var(--text-dim); font-weight: 600; }
+    .eta { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; text-align: right; }
+    .eta-left { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-dim); }
+    .eta-finish { font-family: var(--font-mono); font-size: 1.05rem; font-size: clamp(0.85rem, 6cqi, 1.3rem); font-weight: 700; color: var(--text); }
+
+    .bar {
+      position: relative;
+      height: 6px;
+      margin-top: 0.55rem;
+      border-radius: 999px;
+      background: rgba(var(--accent-rgb), 0.12);
+      overflow: hidden;
+    }
+    .bar-fill {
+      position: absolute;
+      inset: 0;
+      transform-origin: left center;
+      transform: scaleX(0);
+      background: linear-gradient(90deg, rgba(var(--accent-rgb), 0.55), var(--accent));
+      box-shadow: 0 0 12px var(--accent);
+      border-radius: inherit;
+      transition: transform 4.5s linear;
+    }
+    .bar::after {
+      /* lysende "sveip" over baren mens den printer */
+      content: '';
+      position: absolute;
+      top: 0; bottom: 0;
+      width: 30%;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.45), transparent);
+      transform: translateX(-120%);
+      opacity: 0;
+    }
+    .card[data-state="printing"] .bar::after { opacity: 1; animation: sweep 2.6s linear infinite; }
+    @keyframes sweep { to { transform: translateX(420%); } }
+    .bar-ticks {
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(90deg, transparent 0 calc(10% - 1px), rgba(5, 7, 13, 0.55) calc(10% - 1px) 10%);
+    }
+
+    .card-meta {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.35rem 0.75rem;
+      margin-top: auto;
+      padding: 0.55rem 0.9rem 0.75rem;
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      color: var(--text-dim);
+    }
+    .meta { display: inline-flex; align-items: center; gap: 0.3rem; white-space: nowrap; }
+    .meta svg { width: 12px; height: 12px; color: var(--text-faint); }
+    .meta b { color: var(--text); font-weight: 600; }
+    .ams { display: inline-flex; gap: 4px; margin-left: auto; }
+    .ams span {
+      width: 11px; height: 11px;
+      border-radius: 3px;
+      border: 1px solid rgba(255, 255, 255, 0.25);
+      box-shadow: 0 0 6px rgba(0, 0, 0, 0.4);
+    }
+    html[data-theme="light"] .ams span { border-color: rgba(0, 0, 0, 0.2); box-shadow: none; }
+
+    /* ── I dag-stripen ──────────────────────────────────────── */
+    .today {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: clamp(1rem, 4vw, 3.5rem);
+      padding: 0.7rem 1.5rem;
+      border-top: 1px solid var(--line);
+      background: linear-gradient(0deg, rgba(var(--today-rgb, 255, 122, 26), 0.05), transparent), var(--panel);
+    }
+    .today-item { display: flex; align-items: baseline; gap: 0.5rem; }
+    .today-item b {
+      font-family: var(--font-mono);
+      font-size: 1.6rem;
+      font-weight: 700;
       color: var(--orange);
+      text-shadow: 0 0 16px rgba(255, 122, 26, 0.18);
     }
+    body.fit .today { padding: 0.45rem 1rem; }
+    body.fit .today-item b { font-size: 1.25rem; }
 
-    body.fit-screen .today-value { font-size: 1.1rem; }
-    body.fit-screen .today-label { font-size: 0.55rem; }
+    /* ── Verifisering ───────────────────────────────────────── */
+    .verify {
+      max-width: 440px;
+      margin: 3rem auto;
+      padding: 2rem;
+      text-align: center;
+    }
+    .verify h2 { font-size: 1.2rem; letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 0.5rem; }
+    .verify p { color: var(--text-dim); font-size: 0.88rem; margin-bottom: 1.4rem; }
+    .verify input {
+      width: 220px;
+      padding: 0.7rem 1rem;
+      border-radius: 10px;
+      border: 1px solid var(--line-strong);
+      background: rgba(0, 0, 0, 0.25);
+      color: var(--text);
+      font: 700 1.6rem var(--font-mono);
+      letter-spacing: 0.45em;
+      text-align: center;
+      outline: none;
+    }
+    .verify input:focus { border-color: var(--orange); box-shadow: 0 0 0 3px rgba(255, 122, 26, 0.2); }
+    .verify-actions { display: flex; flex-direction: column; align-items: center; gap: 0.6rem; margin-top: 1.2rem; }
+    .verify-error { color: var(--red); font-size: 0.82rem; margin-top: 0.8rem; }
 
-    /* ── Footer ── */
-    footer { text-align: center; padding: 2rem; font-size: 0.72rem; color: var(--text-faint); }
-    footer a { color: var(--orange); text-decoration: none; }
+    footer.page-foot {
+      text-align: center;
+      padding: 1.2rem;
+      font-size: 0.68rem;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--text-faint);
+    }
+    footer.page-foot a { color: var(--orange); text-decoration: none; }
+    body.fit footer.page-foot { display: none; }
   </style>
 </head>
 <body>
 
-<header>
-  <img src="https://www.makerspaceringebu.no/wp-content/uploads/2021/05/MSR_navnetrekk-liggende-svart.png"
-       alt="Makerspace Ringebu" />
-  <div class="header-center" id="header-stats"></div>
-  <div class="header-right">
-    <a href="/" style="color:#fff;text-decoration:none;font-size:0.85rem;font-weight:600;padding:0.4rem 0.8rem;border-radius:6px;background:var(--orange);">Dashboard</a>
-    <a href="/stats" style="color:rgba(255,255,255,0.5);text-decoration:none;font-size:0.85rem;font-weight:600;padding:0.4rem 0.8rem;border-radius:6px;" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='rgba(255,255,255,0.5)'">Statistikk</a>
-    <span class="last-updated" id="last-updated">Henter data...</span>
-    <div class="pulse-dot" id="pulse" style="background: #888;"></div>
+<header class="hud-header">
+  <div class="hud-brand">
+    <img src="https://www.makerspaceringebu.no/wp-content/uploads/2021/05/MSR_navnetrekk-liggende-svart.png" alt="Makerspace Ringebu" />
+    <span class="hud-brand-tag">3D-print status</span>
+  </div>
 
-    <!-- Auto fit-to-screen toggle -->
-    <button class="hdr-btn" onclick="toggleAuto()" id="auto-btn" title="Tilpass til skjerm" style="font-size:0.65rem;width:auto;padding:0 8px;">Auto</button>
+  <div class="hud-stats" id="hud-stats"></div>
 
-    <!-- Morkt tema -->
-    <button class="hdr-btn" id="theme-btn" onclick="toggleTheme()" title="Bytt tema">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z"/>
-      </svg>
+  <div class="hud-right">
+    <nav class="hud-nav">
+      <a href="/" class="active">Dashboard</a>
+      <a href="/stats">Statistikk</a>
+    </nav>
+    <div class="hud-live" id="live" title="Tilkoblingsstatus">
+      <span class="hud-live-dot"></span>
+      <span class="hud-live-text" id="live-text">Kobler til…</span>
+    </div>
+    <span class="hud-clock" id="clock">--:--</span>
+    <button class="hud-btn wide hide-narrow" id="fit-btn" type="button" title="Tilpass til skjerm">Auto</button>
+    <button class="hud-btn" id="theme-btn" type="button" title="Bytt tema" aria-label="Bytt tema">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z"/></svg>
     </button>
-
-    <!-- Fullskjerm -->
-    <button class="hdr-btn" onclick="toggleFullscreen()" title="Fullskjerm">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3"/>
-      </svg>
+    <button class="hud-btn hide-narrow" id="fs-btn" type="button" title="Fullskjerm" aria-label="Fullskjerm">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3"/></svg>
     </button>
   </div>
 </header>
 
 <main>
-  <div class="verify-form" id="verify-form">
+  <section class="verify panel hud-corners" id="verify" hidden>
     <h2>Verifiseringskode</h2>
-    <p>En kode er sendt til din e-post. Skriv inn koden for a koble til Bambu Lab.</p>
-    <input type="text" class="verify-input" id="verify-code" maxlength="6" placeholder="______" autocomplete="one-time-code" inputmode="numeric" />
-    <br />
-    <button class="verify-btn" id="verify-btn" onclick="submitCode()">Bekreft</button>
-    <br />
-    <button class="verify-btn" id="resend-btn" onclick="resendCode()" style="background: transparent; color: var(--orange); border: 1px solid var(--orange); margin-top: 0.5rem; font-size: 0.8rem; padding: 0.4rem 1.2rem;">Send kode pa nytt</button>
-    <div class="verify-error" id="verify-error"></div>
-  </div>
+    <p>En kode er sendt til e-posten for Bambu-kontoen. Skriv den inn for å koble til.</p>
+    <input type="text" id="verify-code" maxlength="6" placeholder="······" autocomplete="one-time-code" inputmode="numeric" />
+    <div class="verify-actions">
+      <button class="hud-primary" id="verify-btn" type="button">Bekreft</button>
+      <button class="hud-primary hud-ghost" id="resend-btn" type="button">Send kode på nytt</button>
+    </div>
+    <div class="verify-error" id="verify-error" hidden></div>
+  </section>
 
-  <div class="error-banner" id="error-banner"></div>
-  <div class="summary" id="summary"></div>
-  <div class="grid" id="grid">
-    <div class="empty">Laster printere...</div>
-  </div>
+  <div class="hud-banner" id="banner" hidden></div>
+
+  <div class="grid" id="grid"></div>
+  <div class="hud-empty" id="empty">Laster printere…</div>
 </main>
 
-<div class="today-bar" id="today-bar"></div>
+<section class="today" id="today" hidden></section>
 
-<footer>
-  <a href="https://makerspaceringebu.no" target="_blank">makerspaceringebu.no</a>
-  &nbsp;&middot;&nbsp; Sanntidsoppdatering via MQTT
+<footer class="page-foot">
+  <a href="https://makerspaceringebu.no" target="_blank" rel="noopener">makerspaceringebu.no</a>
+  &nbsp;·&nbsp; Sanntid via MQTT
 </footer>
 
-<script>
-  // ── State ──
-  const alertedPrinters = new Set();
-  const finishedAt = {}; // printer id -> timestamp when it finished
-  let autoMode = false;
+<template id="card-tpl">
+  <article class="card panel hud-corners">
+    <div class="card-fill"></div>
+    <div class="card-alert"></div>
+    <header class="card-head">
+      <div class="card-id"><span class="card-name"></span><span class="card-model"></span></div>
+      <span class="chip"><i></i><span class="chip-text"></span></span>
+    </header>
+    <div class="card-visual">
+      <img class="thumb" alt="" decoding="async" hidden />
+      <svg class="placeholder" viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round">
+        <path d="M32 6 54 18v28L32 58 10 46V18z"/><path d="M10 18l22 12 22-12M32 30v28"/>
+        <path d="M21 12l22 12" opacity=".45"/>
+      </svg>
+    </div>
+    <div class="card-job" hidden></div>
+    <div class="card-main">
+      <div class="readout">
+        <span class="pct"><span class="pct-num">0</span><small>%</small></span>
+        <span class="state-msg"></span>
+        <span class="eta"><span class="eta-left"></span><span class="eta-finish"></span></span>
+      </div>
+      <div class="bar"><div class="bar-fill"></div><div class="bar-ticks"></div></div>
+    </div>
+    <footer class="card-meta">
+      <span class="meta m-nozzle" title="Dyse">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 14.76V3.5a2.5 2.5 0 00-5 0v11.26a4.5 4.5 0 105 0z"/></svg><b></b>
+      </span>
+      <span class="meta m-bed" title="Plate">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="9" width="20" height="6" rx="1.5"/></svg><b></b>
+      </span>
+      <span class="meta m-layer" title="Lag">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg><b></b>
+      </span>
+      <span class="ams"></span>
+    </footer>
+  </article>
+</template>
 
-  // ── Lydvarsel ──
-  function playAlertSound() {
+<script>
+(function () {
+  'use strict';
+
+  const $ = (sel, root = document) => root.querySelector(sel);
+  const params = new URLSearchParams(location.search);
+  const KIOSK = params.has('kiosk');
+
+  const grid = $('#grid');
+  const cards = new Map();           // printer id -> card-element
+  const finishedAt = {};             // printer id -> tidspunkt vi så at den ble ferdig
+  const seen = new Set();            // printere vi har sett minst én gang
+  const alerted = new Set();
+  let lastPrinters = [];
+
+  // ── Små hjelpere som bare rører DOM når noe faktisk endres ──
+  function setText(el, v) { v = v == null ? '' : String(v); if (el.textContent !== v) el.textContent = v; }
+  function setHidden(el, h) { if (el.hidden !== h) el.hidden = h; }
+  function setAttr(el, k, v) { if (el.getAttribute(k) !== v) el.setAttribute(k, v); }
+  function setTransform(el, v) { if (el.style.transform !== v) el.style.transform = v; }
+
+  function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+
+  const DEMO = params.has('demo');
+  let demoReal = null;  // ekte printerliste (navn) brukt i demo
+  // ── Demomodus: oppdiktede printere som "printer" (?demo / ?bambu_demo) ──
+  // Bruker ekte printernavn når de finnes, ellers en liten fiktiv flåte.
+  const DEMO_JOBS = [
+    ['Benchy.3mf', 900, '#ff8a3d'],
+    ['Telefonholder_v2.3mf', 1500, '#4fc3f7'],
+    ['Navneskilt_Ringebu.3mf', 1200, '#9ccc65'],
+    ['Vase_spiral.3mf', 2100, '#f06292'],
+    ['Kabelklips_x10.3mf', 600, '#ffd54f'],
+  ];
+  const DEMO_AMS = [
+    [{ color: '#ff6a00', type: 'PLA' }, { color: '#1e88e5', type: 'PETG' }, { color: '#ffffff', type: 'PLA' }, { color: '#212121', type: 'PLA' }],
+    [{ color: '#43a047', type: 'PLA' }],
+    [{ color: '#e53935', type: 'PLA' }, { color: '#fdd835', type: 'PLA' }],
+  ];
+  function demoThumb(color) {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><g stroke="#1a1a1a" stroke-width="3" stroke-linejoin="round">'
+      + '<path fill="' + color + '" d="M100 28 164 62v76l-64 34-64-34V62z"/>'
+      + '<path fill="rgba(0,0,0,.18)" d="M100 96v76l64-34V62z"/><path fill="rgba(255,255,255,.25)" d="M36 62l64 34 64-34-64-34z"/></g></svg>';
+    return 'data:image/svg+xml;base64,' + btoa(svg);
+  }
+  function demoPrinters(real) {
+    const fleet = (real && real.length ? real : ['Mini 1', 'Mini 2', 'Mini 3', 'Mini 4', 'Mini 5', 'Mini 6', 'Mini 7', 'X1 Carbon']
+      .map((n, i) => ({ id: 'demo' + i, name: n, model: n.startsWith('Mini') ? 'A1 mini' : 'X1 Carbon', online: true })));
+    const now = Date.now() / 1000;
+    return fleet.map((p, i) => {
+      const [title, dur, color] = DEMO_JOBS[i % DEMO_JOBS.length];
+      const role = i === fleet.length - 1 && fleet.length > 4 ? 'offline' : ['print', 'print', 'idle', 'print', 'paused', 'print'][i % 6];
+      const base = { id: p.id, name: p.name, model: p.model, online: role !== 'offline', print_status: 'IDLE',
+        task_name: null, progress: null, time_remaining: null, layer: null, total_layers: null,
+        nozzle_temp: 25 + (i % 3), bed_temp: 23 + (i % 2), spd_lvl: 2, ams_colors: DEMO_AMS[i % DEMO_AMS.length], thumbnail: null };
+      if (role === 'offline' || role === 'idle') return base;
+      const layers = Math.round(dur / 6);
+      if (role === 'paused') {
+        return Object.assign(base, { _plan_g: Math.round(dur / 25), print_status: 'PAUSED', task_name: title, progress: 63, time_remaining: Math.round(dur * 0.37) * 6,
+          layer: Math.round(layers * 0.63), total_layers: layers, nozzle_temp: 180, bed_temp: 60, thumbnail: demoThumb(color) });
+      }
+      // Syklus: printer i `dur` sekunder, er "ferdig" i 45 s, starter på nytt
+      const t = (now + i * 211) % (dur + 45);
+      if (t >= dur) return Object.assign(base, { print_status: 'SUCCESS', task_name: title, progress: 100, thumbnail: demoThumb(color) });
+      const pct = Math.floor(t / dur * 100);
+      return Object.assign(base, { _plan_g: Math.round(dur / 25), print_status: 'RUNNING', task_name: title, progress: pct,
+        time_remaining: Math.round((dur - t) * 6), layer: Math.max(1, Math.round(layers * pct / 100)), total_layers: layers,
+        nozzle_temp: 218 + (i % 5), bed_temp: 60 + (i % 3) * 5, spd_lvl: [2, 3, 2, 4][i % 4], thumbnail: demoThumb(color) });
+    });
+  }
+  // "I dag" i demo: faste ferdige prints + pågående prints × fremdrift (tallene vokser)
+  function demoToday(list) {
+    const d = { prints: 9, weight_g: 381.6, time_s: 21600, length_cm: 12720 };
+    (list || []).forEach(p => {
+      if (!p._plan_g || (p.print_status !== 'RUNNING' && p.print_status !== 'PAUSED')) return;
+      const pct = (p.progress || 0) / 100;
+      d.prints += 1;
+      d.weight_g += p._plan_g * pct;
+      d.length_cm += p._plan_g * 33.3 * pct;
+      d.time_s += Math.round(p._plan_g * 25 * pct);
+    });
+    return d;
+  }
+
+  // ── Formatering ──
+  function formatTime(s) {
+    if (!s || s <= 0) return '';
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    if (h > 0) return `${h}t ${m}m igjen`;
+    if (m > 0) return `${m} min igjen`;
+    return 'under 1 min';
+  }
+  function finishClock(s) {
+    if (!s || s <= 0) return '';
+    const d = new Date(Date.now() + s * 1000);
+    const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    const days = Math.round((new Date(d).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 864e5);
+    return days >= 1 ? `${days === 1 ? 'i morgen' : '+' + days + 'd'} ${hm}` : hm;
+  }
+  function formatWeight(g) { g = g || 0; return g >= 1000 ? (g / 1000).toFixed(1) + ' kg' : Math.round(g) + ' g'; }
+  function formatLength(cm) { const m = (cm || 0) / 100; return m >= 1000 ? (m / 1000).toFixed(1) + ' km' : Math.round(m) + ' m'; }
+  function formatDuration(s) {
+    s = s || 0;
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    return h > 0 ? `${h}t ${m}m` : `${m}m`;
+  }
+
+  // ── Status ──
+  function stateOf(p) {
+    if (!p.online) return 'offline';
+    const s = (p.print_status || '').toUpperCase();
+    if (s === 'SUCCESS' || s === 'FINISH') {
+      if (!(p.id in finishedAt)) {
+        // Var den allerede ferdig første gang vi så den, er den ikke "nettopp ferdig".
+        finishedAt[p.id] = seen.has(p.id) ? Date.now() : 0;
+      }
+      return Date.now() - finishedAt[p.id] < 120000 ? 'done' : 'idle';
+    }
+    delete finishedAt[p.id];
+    if (s === 'RUNNING' || s === 'PRINTING' || s === 'PREPARE') return 'printing';
+    if (s === 'PAUSED' || s === 'PAUSE') return 'paused';
+    if (s === 'FAIL' || s === 'FAILED') return 'failed';
+    return 'idle';
+  }
+
+  const LABEL = { printing: 'Printer', paused: 'Pauset', failed: 'Feil', done: 'Ferdig', idle: 'Klar', offline: 'Offline' };
+  const MESSAGE = { paused: 'Pauset', failed: 'Feilet', done: 'Fullført', idle: 'Klar', offline: 'Offline' };
+
+  // ── Kort ──
+  function createCard(id) {
+    const el = $('#card-tpl').content.firstElementChild.cloneNode(true);
+    el.dataset.dev = id;
+    el._ = {
+      fill: $('.card-fill', el), name: $('.card-name', el), model: $('.card-model', el),
+      chip: $('.chip-text', el), thumb: $('.thumb', el),
+      job: $('.card-job', el), pct: $('.pct', el), pctNum: $('.pct-num', el),
+      msg: $('.state-msg', el), eta: $('.eta', el), etaLeft: $('.eta-left', el),
+      etaFinish: $('.eta-finish', el), bar: $('.bar', el), barFill: $('.bar-fill', el),
+      nozzle: $('.m-nozzle', el), bed: $('.m-bed', el), layer: $('.m-layer', el), ams: $('.ams', el),
+      thumbBase: null, amsSig: null,
+    };
+    return el;
+  }
+
+  // Bambu-cover-URL-er er signerte og får ny query-streng hvert minutt.
+  // Bytt bare bilde når selve filen er en annen, og forhåndslast før bytte
+  // så det aldri vises en tom boks.
+  function setThumb(card, url) {
+    const r = card._;
+    const base = url ? url.split('?')[0] : '';
+    if (base === r.thumbBase) return;
+    r.thumbBase = base;
+    if (!url) {
+      r.thumb.hidden = true; card.classList.remove('has-thumb'); r.thumb.removeAttribute('src');
+      return;
+    }
+    const pre = new Image();
+    pre.onload = () => {
+      if (r.thumbBase !== base) return;
+      r.thumb.src = url; r.thumb.hidden = false; card.classList.add('has-thumb');
+    };
+    pre.onerror = () => { if (r.thumbBase === base) r.thumbBase = null; };  // prøv igjen neste runde
+    pre.src = url;
+  }
+
+  function updateCard(card, p) {
+    const r = card._;
+    const state = stateOf(p);
+    const hasJob = state === 'printing' || state === 'paused' || state === 'failed';
+    const progress = p.progress != null && !isNaN(parseFloat(p.progress)) ? Math.max(0, Math.min(100, parseFloat(p.progress))) : null;
+
+    if (card.dataset.state !== state) card.dataset.state = state;
+    card.classList.toggle('has-job', hasJob && progress != null);
+
+    setText(r.name, p.name || p.id);
+    setText(r.model, p.model && p.model !== 'Ukjent' ? p.model : '');
+    setText(r.chip, LABEL[state]);
+
+    setThumb(card, p.thumbnail || '');
+
+    const job = hasJob && p.task_name ? p.task_name : '';
+    setText(r.job, job);
+    setHidden(r.job, !job);
+
+    // Fremdrift
+    const showPct = hasJob && progress != null;
+    setHidden(r.pct, !showPct);
+    if (showPct) setText(r.pctNum, Math.round(progress));
+
+    setHidden(r.msg, state === 'printing');
+    setText(r.msg, MESSAGE[state] || '');
+
+    const left = state === 'printing' ? formatTime(p.time_remaining) : '';
+    const fin = state === 'printing' ? finishClock(p.time_remaining) : '';
+    setHidden(r.eta, !(left || fin));
+    setText(r.etaLeft, left);
+    setText(r.etaFinish, fin ? 'ferdig ' + fin : '');
+
+    const barValue = state === 'done' ? 1 : (showPct ? progress / 100 : 0);
+    setHidden(r.bar, !(showPct || state === 'done'));
+    setTransform(r.barFill, `scaleX(${barValue})`);
+    setTransform(r.fill, `scaleX(${showPct ? progress / 100 : 0})`);
+
+    // Meta-linje
+    const online = !!p.online;
+    setHidden(r.nozzle, !(online && p.nozzle_temp != null));
+    if (p.nozzle_temp != null) setText($('b', r.nozzle), Math.round(p.nozzle_temp) + '°');
+    setHidden(r.bed, !(online && p.bed_temp != null));
+    if (p.bed_temp != null) setText($('b', r.bed), Math.round(p.bed_temp) + '°');
+    const showLayer = hasJob && p.layer != null && p.total_layers > 0;
+    setHidden(r.layer, !showLayer);
+    if (showLayer) setText($('b', r.layer), `${p.layer}/${p.total_layers}`);
+
+    const colors = (online && Array.isArray(p.ams_colors)) ? p.ams_colors.filter(c => /^#[0-9a-f]{6}$/i.test(c.color || '')) : [];
+    const amsSig = colors.map(c => c.color + c.type).join('|');
+    if (amsSig !== r.amsSig) {
+      r.amsSig = amsSig;
+      r.ams.replaceChildren(...colors.map(c => {
+        const s = document.createElement('span');
+        s.style.background = c.color;
+        s.title = `${c.type || ''} ${c.color}`.trim();
+        return s;
+      }));
+    }
+  }
+
+  function applyCards(printers) {
+    const ids = new Set();
+    printers.forEach((p, i) => {
+      ids.add(p.id);
+      let card = cards.get(p.id);
+      if (!card) { card = createCard(p.id); cards.set(p.id, card); }
+      updateCard(card, p);
+      if (grid.children[i] !== card) grid.insertBefore(card, grid.children[i] || null);
+      seen.add(p.id);
+    });
+    cards.forEach((card, id) => { if (!ids.has(id)) { card.remove(); cards.delete(id); } });
+    layoutFit();
+  }
+
+  // ── Header-tall ──
+  function updateHudStats(printers) {
+    const states = printers.map(stateOf);
+    const count = s => states.filter(x => x === s).length;
+    const items = [
+      ['Totalt', printers.length, ''],
+      ['Online', printers.filter(p => p.online).length, ''],
+      ['Printer', count('printing'), 'is-orange'],
+    ];
+    const failed = count('failed');
+    if (failed) items.push(['Feil', failed, 'is-red']);
+    const box = $('#hud-stats');
+    const sig = JSON.stringify(items);
+    if (box.dataset.sig === sig) return;
+    box.dataset.sig = sig;
+    box.replaceChildren(...items.map(([label, val, cls]) => {
+      const el = document.createElement('span');
+      el.className = 'hud-stat ' + cls;
+      const b = document.createElement('b');
+      b.textContent = val;
+      el.append(b, ' ' + label);
+      return el;
+    }));
+  }
+
+  // ── Lydvarsel ved feil ──
+  let audioCtx = null;
+  function playAlert() {
     try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
       [0, 0.3, 0.6].forEach(delay => {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.connect(gain); gain.connect(ctx.destination);
+        const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+        osc.connect(gain); gain.connect(audioCtx.destination);
         osc.frequency.value = 880; osc.type = 'square'; gain.gain.value = 0.08;
-        osc.start(ctx.currentTime + delay); osc.stop(ctx.currentTime + delay + 0.15);
+        osc.start(audioCtx.currentTime + delay); osc.stop(audioCtx.currentTime + delay + 0.15);
       });
     } catch (e) {}
   }
 
-  // ── Tema ──
-  function toggleTheme() {
-    document.documentElement.classList.toggle('dark');
-    localStorage.setItem('theme', document.documentElement.classList.contains('dark') ? 'dark' : 'light');
-  }
-  if (localStorage.getItem('theme') === 'dark') document.documentElement.classList.add('dark');
-
-  // ── Fullskjerm ──
-  function toggleFullscreen() {
-    if (document.fullscreenElement) document.exitFullscreen();
-    else document.documentElement.requestFullscreen();
-  }
-
-  // Auto-fullskjerm hvis ?autoscreen i URL (fra start.bat)
-  if (new URLSearchParams(location.search).has('autoscreen')) {
-    const tryFullscreen = () => {
-      document.documentElement.requestFullscreen().catch(() => {});
-      document.removeEventListener('click', tryFullscreen);
-      document.removeEventListener('keydown', tryFullscreen);
-    };
-    // Prøv umiddelbart (virker i noen oppsett), ellers ved første interaksjon
-    setTimeout(() => {
-      document.documentElement.requestFullscreen().catch(() => {
-        document.addEventListener('click', tryFullscreen, { once: true });
-        document.addEventListener('keydown', tryFullscreen, { once: true });
-      });
-    }, 1000);
-  }
-
-  // ── Auto toggle ──
-  function toggleAuto() {
-    autoMode = !autoMode;
-    const btn = document.getElementById('auto-btn');
-    if (autoMode) {
-      document.body.classList.add('fit-screen');
-      btn.classList.add('active');
-      applyAutoGrid();
-    } else {
-      document.body.classList.remove('fit-screen');
-      const grid = document.getElementById('grid');
-      grid.classList.remove('cols-5');
-      btn.classList.remove('active');
-    }
-    localStorage.setItem('autoMode', autoMode ? '1' : '0');
-  }
-
-  function applyAutoGrid() {
-    if (!autoMode) return;
-    const grid = document.getElementById('grid');
-    grid.classList.remove('cols-5');
-    grid.classList.add('cols-5');
-  }
-
-  // Gjenopprett auto-modus
-  if (localStorage.getItem('autoMode') === '1') {
-    autoMode = true;
-    document.body.classList.add('fit-screen');
-    document.getElementById('auto-btn').classList.add('active');
-  }
-
-  // ── Hjelpefunksjoner ──
-  function formatTime(seconds) {
-    if (!seconds || seconds <= 0) return null;
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    if (h > 0) return `${h}t ${m}m`;
-    if (m > 0) return `${m} min`;
-    return 'Under 1 min';
-  }
-
-  function estimatedFinish(seconds) {
-    if (!seconds || seconds <= 0) return null;
-    const finish = new Date(Date.now() + seconds * 1000);
-    const hh = String(finish.getHours()).padStart(2, '0');
-    const mm = String(finish.getMinutes()).padStart(2, '0');
-    return `${hh}:${mm}`;
-  }
-
-  function speedLabel(lvl) {
-    const labels = { 1: 'Stille', 2: 'Normal', 3: 'Sport', 4: 'Ludicrous' };
-    return labels[lvl] || null;
-  }
-
-  function getEffectiveStatus(printer) {
-    const s = (printer.print_status || '').toUpperCase();
-    if (s === 'SUCCESS' || s === 'FINISH') {
-      // Sjekk om den nettopp ble ferdig (under 2 min siden)
-      if (!finishedAt[printer.id]) {
-        finishedAt[printer.id] = Date.now();
-      }
-      const elapsed = Date.now() - finishedAt[printer.id];
-      if (elapsed < 120000) return 'JUST_DONE';
-      return 'IDLE'; // etter 2 min -> ledig
-    }
-    // Hvis printeren ikke lenger er ferdig, nullstill
-    if (finishedAt[printer.id] && s !== 'SUCCESS' && s !== 'FINISH') {
-      delete finishedAt[printer.id];
-    }
-    return s;
-  }
-
-  function statusLabel(printer) {
-    if (!printer.online) return { text: 'Offline', cls: 'badge-offline' };
-    const s = getEffectiveStatus(printer);
-    if (s === 'RUNNING' || s === 'PRINTING') return { text: 'Printer', cls: 'badge-printing' };
-    if (s === 'FAIL' || s === 'FAILED') return { text: 'Feil', cls: 'badge-offline' };
-    if (s === 'PAUSED' || s === 'PAUSE') return { text: 'Pauset', cls: 'badge-printing' };
-    if (s === 'JUST_DONE') return { text: 'Ferdig', cls: 'badge-done' };
-    if (s === 'IDLE' || s === '' || s === 'SUCCESS' || s === 'FINISH') return { text: 'Ledig', cls: 'badge-idle' };
-    return { text: printer.print_status || 'Online', cls: 'badge-online' };
-  }
-
-  function cardClass(printer) {
-    if (!printer.online) return 'offline';
-    const s = getEffectiveStatus(printer);
-    if (s === 'RUNNING' || s === 'PRINTING') return 'printing';
-    if (s === 'FAIL' || s === 'FAILED') return 'failed';
-    if (s === 'PAUSED' || s === 'PAUSE') return 'paused';
-    if (s === 'JUST_DONE') return 'just-done';
-    return 'online';
-  }
-
-  function sortPrinters(printers) {
-    return printers.sort((a, b) =>
-      a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
-    );
-  }
-
-  function buildBodyHtml(p) {
-    const cls = cardClass(p);
-    const isPrinting = cls === 'printing';
-    const isFailed = cls === 'failed';
-    const isPaused = cls === 'paused';
-    const isJustDone = cls === 'just-done';
-    const hasJob = isPrinting || isFailed || isPaused;
-    const progress = p.progress != null ? parseFloat(p.progress) : null;
-    const timeStr = formatTime(p.time_remaining);
-    const finishStr = estimatedFinish(p.time_remaining);
-
-    let bodyHtml = '';
-    if (isFailed) {
-      bodyHtml += `<div class="idle-msg" style="color: var(--red); font-style: normal; font-weight: 600;">Printing feilet!</div>`;
-    } else if (isPaused) {
-      bodyHtml += `<div class="idle-msg" style="color: #f39c12; font-style: normal; font-weight: 600;">Printing pauset</div>`;
-    }
-
-    if ((isPrinting || isPaused) && progress != null) {
-      bodyHtml += `<div class="progress-pct">${Math.round(progress)}%</div>`;
-      if (timeStr || finishStr) {
-        bodyHtml += `
-          <div class="time-row">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-            </svg>
-            ${timeStr ? timeStr + ' gjenstår' : ''}${timeStr && finishStr ? ' — ' : ''}${finishStr ? '<span class="time-finish">Ferdig ' + finishStr + '</span>' : ''}
-          </div>`;
-      }
-    } else if (isFailed && progress != null) {
-      bodyHtml += `<div class="progress-pct" style="color: var(--red)">Stoppet ${Math.round(progress)}%</div>`;
-    } else if (isJustDone) {
-      bodyHtml += `<div class="idle-msg" style="color: var(--green); font-style: normal; font-weight: 700;">Print fullfort!</div>`;
-    } else if (!p.online) {
-      bodyHtml += `<div class="idle-msg">Printeren er ikke tilgjengelig.</div>`;
-    } else if (!hasJob) {
-      bodyHtml += `<div class="idle-msg">Ingen aktiv jobb.</div>`;
-    }
-    return bodyHtml;
-  }
-
-  function renderCard(p) {
-    const badge = statusLabel(p);
-    const cls = cardClass(p);
-    const isPrinting = cls === 'printing';
-    const isFailed = cls === 'failed';
-    const isPaused = cls === 'paused';
-    const isJustDone = cls === 'just-done';
-    const hasJob = isPrinting || isFailed || isPaused;
-    const progress = p.progress != null ? parseFloat(p.progress) : null;
-
-    const zebraSpeeds = { 1: '3s', 2: '1.5s', 3: '1.2s', 4: '0.9s' };
-    const zebraSpeed = zebraSpeeds[p.spd_lvl] || '1.5s';
-    let progressBg = '';
-    if (hasJob && progress != null) {
-      progressBg = `<div class="card-progress-bg" style="width: ${progress}%; animation-duration: ${zebraSpeed}"></div>`;
-    } else if (isJustDone) {
-      progressBg = `<div class="card-progress-bg"></div>`;
-    }
-
-    const thumbHtml = p.thumbnail
-      ? `<div class="thumb-wrap"><img src="${p.thumbnail}" alt="Forhandsvisning" /></div>`
-      : '';
-
-    const bodyHtml = buildBodyHtml(p);
-
-    return `
-      <div class="card ${cls}" data-dev="${p.id}">
-        ${progressBg}
-        <div class="card-header">
-          <div>
-            <div class="card-name">${p.name}</div>
-          </div>
-          <span class="badge ${badge.cls}">${badge.text}</span>
-        </div>
-        ${thumbHtml}
-        <div class="card-body">${bodyHtml}</div>
-      </div>`;
-  }
-
-  // Oppdaterer et eksisterende kort i-place: bytter kun felter som faktisk
-  // har endret seg, og gjenbruker <img>-elementet for thumbnail. Dette
-  // unngår at kortene blir blanke/flicker mellom refresher.
-  function updateCardInPlace(card, p) {
-    const badge = statusLabel(p);
-    const cls = cardClass(p);
-    const isPrinting = cls === 'printing';
-    const isFailed = cls === 'failed';
-    const isPaused = cls === 'paused';
-    const isJustDone = cls === 'just-done';
-    const hasJob = isPrinting || isFailed || isPaused;
-    const progress = p.progress != null ? parseFloat(p.progress) : null;
-
-    const wantClass = `card ${cls}`;
-    if (card.className !== wantClass) card.className = wantClass;
-
-    const nameEl = card.querySelector('.card-name');
-    if (nameEl && nameEl.textContent !== p.name) nameEl.textContent = p.name;
-
-    const badgeEl = card.querySelector('.badge');
-    if (badgeEl) {
-      const bcls = `badge ${badge.cls}`;
-      if (badgeEl.className !== bcls) badgeEl.className = bcls;
-      if (badgeEl.textContent !== badge.text) badgeEl.textContent = badge.text;
-    }
-
-    // Progress-bakgrunn — bevar elementet for at CSS-transition skal trigges.
-    const zebraSpeeds = { 1: '3s', 2: '1.5s', 3: '1.2s', 4: '0.9s' };
-    const zebraSpeed = zebraSpeeds[p.spd_lvl] || '1.5s';
-    let bg = card.querySelector('.card-progress-bg');
-    if (hasJob && progress != null) {
-      if (!bg) {
-        bg = document.createElement('div');
-        bg.className = 'card-progress-bg';
-        bg.style.width = '0%';
-        bg.style.animationDuration = zebraSpeed;
-        card.insertBefore(bg, card.firstChild);
-        requestAnimationFrame(() => { bg.style.width = `${progress}%`; });
-      } else {
-        if (bg.style.animationDuration !== zebraSpeed) bg.style.animationDuration = zebraSpeed;
-        const wantWidth = `${progress}%`;
-        if (bg.style.width !== wantWidth) bg.style.width = wantWidth;
-      }
-    } else if (isJustDone) {
-      if (!bg) {
-        bg = document.createElement('div');
-        bg.className = 'card-progress-bg';
-        card.insertBefore(bg, card.firstChild);
-      } else {
-        if (bg.style.width) bg.style.width = '';
-        if (bg.style.animationDuration) bg.style.animationDuration = '';
-      }
-    } else if (bg) {
-      bg.remove();
-    }
-
-    // Thumbnail — gjenbruk <img> så bildet ikke re-lastes (ingen hvit flash).
-    const wrap = card.querySelector('.thumb-wrap');
-    if (p.thumbnail) {
-      if (wrap) {
-        const img = wrap.querySelector('img');
-        if (img && img.getAttribute('src') !== p.thumbnail) img.setAttribute('src', p.thumbnail);
-      } else {
-        const newWrap = document.createElement('div');
-        newWrap.className = 'thumb-wrap';
-        const img = document.createElement('img');
-        img.setAttribute('src', p.thumbnail);
-        img.alt = 'Forhandsvisning';
-        newWrap.appendChild(img);
-        const header = card.querySelector('.card-header');
-        header.insertAdjacentElement('afterend', newWrap);
-      }
-    } else if (wrap) {
-      wrap.remove();
-    }
-
-    const body = card.querySelector('.card-body');
-    if (body) {
-      const newBodyHtml = buildBodyHtml(p);
-      if (body.dataset.sig !== newBodyHtml) {
-        body.innerHTML = newBodyHtml;
-        body.dataset.sig = newBodyHtml;
-      }
-    }
-  }
-
-  function applyCards(grid, printers) {
-    const existing = new Map();
-    grid.querySelectorAll(':scope > .card[data-dev]').forEach(c => existing.set(c.dataset.dev, c));
-    const seen = new Set();
-    const ordered = [];
-
-    printers.forEach(p => {
-      seen.add(p.id);
-      let card = existing.get(p.id);
-      if (card) {
-        updateCardInPlace(card, p);
-      } else {
-        const tmp = document.createElement('div');
-        tmp.innerHTML = renderCard(p);
-        card = tmp.firstElementChild;
-        const body = card.querySelector('.card-body');
-        if (body) body.dataset.sig = buildBodyHtml(p);
-      }
-      ordered.push(card);
-    });
-
-    existing.forEach((c, id) => { if (!seen.has(id)) c.remove(); });
-
-    // Slipp inn nye kort og reorder uten å berøre uendrede.
-    ordered.forEach((card, i) => {
-      if (grid.children[i] !== card) grid.insertBefore(card, grid.children[i] || null);
-    });
-  }
-
-  function renderSummary(printers) {
-    const total = printers.length;
-    const online = printers.filter(p => p.online).length;
-    const printing = printers.filter(p => { const s = getEffectiveStatus(p); return s === 'RUNNING' || s === 'PRINTING'; }).length;
-    const failed = printers.filter(p => { const s = getEffectiveStatus(p); return s === 'FAIL' || s === 'FAILED'; }).length;
-
-    // Render into header
-    let headerHtml = `
-      <span class="header-stat"><span class="header-stat-value">${total}</span> totalt</span>
-      <span class="header-stat-sep"></span>
-      <span class="header-stat"><span class="header-stat-value">${online}</span> online</span>
-      <span class="header-stat-sep"></span>
-      <span class="header-stat"><span class="header-stat-value orange">${printing}</span> printer</span>`;
-    if (failed > 0) headerHtml += `<span class="header-stat-sep"></span><span class="header-stat"><span class="header-stat-value red">${failed}</span> feil</span>`;
-    document.getElementById('header-stats').innerHTML = headerHtml;
-
-    return ''; // summary div is hidden now
-  }
-
-  // ── Verifisering ──
-  async function submitCode() {
-    const input = document.getElementById('verify-code');
-    const btn = document.getElementById('verify-btn');
-    const errEl = document.getElementById('verify-error');
-    const code = input.value.trim();
-    if (!code) return;
-    btn.disabled = true; btn.textContent = 'Verifiserer...'; errEl.style.display = 'none';
-    try {
-      const res = await fetch('/api/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) });
-      const data = await res.json();
-      if (data.ok) { document.getElementById('verify-form').style.display = 'none'; refresh(); }
-      else { errEl.textContent = data.error || 'Ugyldig kode.'; errEl.style.display = 'block'; }
-    } catch (e) { errEl.textContent = 'Nettverksfeil.'; errEl.style.display = 'block'; }
-    finally { btn.disabled = false; btn.textContent = 'Bekreft'; }
-  }
-
-  async function resendCode() {
-    const btn = document.getElementById('resend-btn');
-    const errEl = document.getElementById('verify-error');
-    btn.disabled = true; btn.textContent = 'Sender...'; errEl.style.display = 'none';
-    try {
-      const res = await fetch('/api/send-code', { method: 'POST' });
-      const data = await res.json();
-      if (data.ok) { btn.textContent = 'Kode sendt!'; setTimeout(() => { btn.textContent = 'Send kode pa nytt'; btn.disabled = false; }, 3000); }
-      else { errEl.textContent = data.error || 'Kunne ikke sende kode.'; errEl.style.display = 'block'; btn.textContent = 'Send kode pa nytt'; btn.disabled = false; }
-    } catch (e) { errEl.textContent = 'Nettverksfeil.'; errEl.style.display = 'block'; btn.textContent = 'Send kode pa nytt'; btn.disabled = false; }
-  }
-
-  document.getElementById('verify-code').addEventListener('keydown', e => { if (e.key === 'Enter') submitCode(); });
-
-  // ── Hovedoppdatering ──
+  // ── Polling ──
+  let inFlight = false;
   async function refresh() {
+    if (inFlight) return;
+    inFlight = true;
     try {
-      const res = await fetch('/api/status');
-      const data = await res.json();
-      const verifyForm = document.getElementById('verify-form');
-      const errorEl = document.getElementById('error-banner');
-
-      if (data.needs_verify_code) {
-        verifyForm.style.display = 'block'; errorEl.style.display = 'none';
-        document.getElementById('grid').innerHTML = ''; document.getElementById('summary').innerHTML = '';
-        return;
-      } else { verifyForm.style.display = 'none'; }
-
-      if (data.error) { errorEl.textContent = 'Feil: ' + data.error; errorEl.style.display = 'block'; }
-      else { errorEl.style.display = 'none'; }
-
-      if (data.last_updated) document.getElementById('last-updated').textContent = 'Sist oppdatert: ' + data.last_updated;
-
-      document.getElementById('pulse').style.background = data.mqtt_connected ? '#2ecc71' : (data.error ? '#e74c3c' : '#888');
-
-      const grid = document.getElementById('grid');
-      const summary = document.getElementById('summary');
-
-      if (!data.printers || data.printers.length === 0) {
-        grid.innerHTML = '<div class="empty">Ingen printere funnet.</div>'; summary.innerHTML = ''; return;
+      let data;
+      if (DEMO) {
+        if (demoReal === null) {
+          try { const r = await (await fetch('/api/status', { cache: 'no-store' })).json(); demoReal = r.printers || []; }
+          catch (e) { demoReal = []; }
+        }
+        data = { printers: demoPrinters(demoReal), error: 'Demomodus – printdataene er oppdiktet.', mqtt_connected: true,
+                 last_updated: new Date().toTimeString().slice(0, 8), needs_verify_code: false };
+      } else {
+        const res = await fetch('/api/status', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        data = await res.json();
       }
 
-      // Lydvarsel
-      data.printers.forEach(p => {
+      setHidden($('#verify'), !data.needs_verify_code);
+      if (data.needs_verify_code) {
+        setLive('error', 'Venter på kode');
+        setHidden($('#banner'), true);
+        return;
+      }
+
+      const banner = $('#banner');
+      setText(banner, data.error ? (DEMO ? data.error : 'Feil: ' + data.error) : '');
+      banner.classList.toggle('is-warn', DEMO);
+      setHidden(banner, !data.error);
+
+      if (data.mqtt_connected) setLive('live', 'Live' + (data.last_updated ? ' · ' + data.last_updated : ''));
+      else setLive(data.error ? 'error' : '', 'Kobler til…');
+
+      const printers = (data.printers || []).slice().sort((a, b) =>
+        (a.name || '').localeCompare(b.name || '', 'no', { numeric: true, sensitivity: 'base' }));
+
+      printers.forEach(p => {
         const s = (p.print_status || '').toUpperCase();
-        if (s === 'FAIL' || s === 'FAILED') { if (!alertedPrinters.has(p.id)) { alertedPrinters.add(p.id); playAlertSound(); } }
-        else { alertedPrinters.delete(p.id); }
+        if (s === 'FAIL' || s === 'FAILED') {
+          // Ikke pip for feil som allerede var der da siden ble lastet
+          if (!alerted.has(p.id)) { alerted.add(p.id); if (seen.has(p.id)) playAlert(); }
+        } else alerted.delete(p.id);
       });
 
-      const sorted = sortPrinters(data.printers);
-      lastPrinters = sorted;
-      summary.innerHTML = renderSummary(sorted);
-      applyCards(grid, sorted);
-
-      if (autoMode) applyAutoGrid();
-    } catch (e) { console.error('Kunne ikke hente status:', e); }
+      lastPrinters = printers;
+      setText($('#empty'), printers.length ? '' : 'Ingen printere funnet.');
+      setHidden($('#empty'), printers.length > 0);
+      applyCards(printers);
+      updateHudStats(printers);
+    } catch (e) {
+      console.error('Kunne ikke hente status:', e);
+      setLive('error', 'Ingen kontakt med server');
+    } finally {
+      inFlight = false;
+    }
   }
 
-  let lastPrinters = [];
-
-  function todayDateStr() {
-    return new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
-  }
-
-  function calcOngoingFilament(printers) {
-    // Kun pågående print som startet i dag
-    const today = todayDateStr();
-    let weightG = 0;
-    if (!printers) return weightG;
-    printers.forEach(p => {
-      const s = getEffectiveStatus(p);
-      if ((s === 'RUNNING' || s === 'PRINTING') && p.progress != null && p.job_started_at) {
-        if (p.job_started_at.slice(0, 10) === today) {
-          const pct = parseFloat(p.progress) / 100;
-          weightG += pct * 20; // estimat ~20g per print
-        }
-      }
-    });
-    return Math.round(weightG);
+  function setLive(kind, text) {
+    const live = $('#live');
+    live.classList.toggle('is-live', kind === 'live');
+    live.classList.toggle('is-error', kind === 'error');
+    setText($('#live-text'), text);
   }
 
   async function refreshToday() {
     try {
-      const res = await fetch('/api/today');
-      const d = await res.json();
-      const bar = document.getElementById('today-bar');
-
-      // Legg til estimert forbruk fra pågående print som startet i dag
-      const ongoingG = calcOngoingFilament(lastPrinters);
-      const totalWeightG = Math.round(d.weight_g) + ongoingG;
-      const meters = Math.round((totalWeightG / 1000) * 330);
-      const lengthStr = meters >= 1000 ? `${(meters / 1000).toFixed(1)}km` : `${meters}m`;
-
-      bar.innerHTML = `
-        <div class="today-item"><span class="today-label">I dag</span></div>
-        <div class="today-item"><span class="today-value">${d.prints}</span><span class="today-label">prints</span></div>
-        <div class="today-item"><span class="today-value">${totalWeightG}g</span><span class="today-label">filament</span></div>
-        <div class="today-item"><span class="today-value">${lengthStr}</span><span class="today-label">lengde</span></div>
-      `;
+      let d = DEMO ? demoToday(lastPrinters) : null;
+      if (!DEMO) {
+        const res = await fetch('/api/today', { cache: 'no-store' });
+        if (!res.ok) return;
+        d = await res.json();
+      }
+      const bar = $('#today');
+      const items = [
+        ['I dag', null],
+        [d.prints || 0, 'prints'],
+        [formatWeight(d.weight_g), 'filament'],
+        [formatLength(d.length_cm), 'lengde'],
+        [formatDuration(d.time_s), 'printtid'],
+      ];
+      const sig = JSON.stringify(items);
+      if (bar.dataset.sig !== sig) {
+        bar.dataset.sig = sig;
+        bar.replaceChildren(...items.map(([v, label]) => {
+          const el = document.createElement('div');
+          el.className = 'today-item';
+          if (label == null) {
+            const e = document.createElement('span'); e.className = 'eyebrow'; e.textContent = v; el.append(e);
+          } else {
+            const b = document.createElement('b'); b.textContent = v;
+            const e = document.createElement('span'); e.className = 'eyebrow'; e.textContent = label;
+            el.append(b, e);
+          }
+          return el;
+        }));
+      }
+      setHidden(bar, false);
     } catch (e) {}
   }
 
+  // ── Tilpass-til-skjerm: finn kolonner/rader som gir størst mulige kort ──
+  let fit = false;
+  function layoutFit() {
+    if (!fit) return;
+    const n = cards.size;
+    if (!n) return;
+    const gap = parseFloat(getComputedStyle(grid).columnGap) || 12;
+    const W = grid.clientWidth, H = grid.clientHeight;
+    const ratio = 0.82;  // ønsket bredde/høyde for et kort
+    let best = null;
+    for (let cols = 1; cols <= n; cols++) {
+      const rows = Math.ceil(n / cols);
+      const w = (W - gap * (cols - 1)) / cols;
+      const h = (H - gap * (rows - 1)) / rows;
+      if (w <= 0 || h <= 0) continue;
+      const cw = Math.min(w, h * ratio * 1.35);   // tillat litt bredere kort enn idealet
+      const score = Math.min(cw, h * ratio);
+      if (!best || score > best.score) best = { score, w: cw, h };
+    }
+    if (!best) return;
+    grid.style.setProperty('--card-w', Math.floor(best.w) + 'px');
+    grid.style.setProperty('--card-h', Math.floor(best.h) + 'px');
+  }
+
+  function setFit(on) {
+    fit = on;
+    document.body.classList.toggle('fit', on);
+    $('#fit-btn').classList.toggle('active', on);
+    if (on) requestAnimationFrame(layoutFit);
+    else { grid.style.removeProperty('--card-w'); grid.style.removeProperty('--card-h'); }
+  }
+  $('#fit-btn').addEventListener('click', () => { setFit(!fit); lsSet('autoMode', fit ? '1' : '0'); });
+  let resizeTimer;
+  window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(layoutFit, 120); });
+
+  // ── Tema / fullskjerm ──
+  $('#theme-btn').addEventListener('click', () => {
+    const light = document.documentElement.dataset.theme !== 'light';
+    document.documentElement.dataset.theme = light ? 'light' : 'dark';
+    lsSet('theme', light ? 'light' : 'dark');
+  });
+  $('#fs-btn').addEventListener('click', () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen().catch(() => {});
+  });
+  if (params.has('autoscreen')) {
+    setTimeout(() => {
+      document.documentElement.requestFullscreen().catch(() => {
+        const once = () => document.documentElement.requestFullscreen().catch(() => {});
+        document.addEventListener('click', once, { once: true });
+        document.addEventListener('keydown', once, { once: true });
+      });
+    }, 1000);
+  }
+  document.addEventListener('fullscreenchange', () => requestAnimationFrame(layoutFit));
+
+  // ── Klokke ──
+  function tick() {
+    const d = new Date();
+    setText($('#clock'), String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'));
+  }
+
+  // ── Verifisering ──
+  async function submitCode() {
+    const btn = $('#verify-btn'), err = $('#verify-error');
+    const code = $('#verify-code').value.trim();
+    if (!code) return;
+    btn.disabled = true; btn.textContent = 'Verifiserer…'; err.hidden = true;
+    try {
+      const res = await fetch('/api/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) });
+      const data = await res.json();
+      if (data.ok) { $('#verify').hidden = true; refresh(); }
+      else { err.textContent = data.error || 'Ugyldig kode.'; err.hidden = false; }
+    } catch (e) { err.textContent = 'Nettverksfeil.'; err.hidden = false; }
+    finally { btn.disabled = false; btn.textContent = 'Bekreft'; }
+  }
+  async function resendCode() {
+    const btn = $('#resend-btn'), err = $('#verify-error');
+    btn.disabled = true; btn.textContent = 'Sender…'; err.hidden = true;
+    try {
+      const res = await fetch('/api/send-code', { method: 'POST' });
+      const data = await res.json();
+      if (data.ok) { btn.textContent = 'Kode sendt!'; setTimeout(() => { btn.textContent = 'Send kode på nytt'; btn.disabled = false; }, 3000); return; }
+      err.textContent = data.error || 'Kunne ikke sende kode.'; err.hidden = false;
+    } catch (e) { err.textContent = 'Nettverksfeil.'; err.hidden = false; }
+    btn.textContent = 'Send kode på nytt'; btn.disabled = false;
+  }
+  $('#verify-btn').addEventListener('click', submitCode);
+  $('#resend-btn').addEventListener('click', resendCode);
+  $('#verify-code').addEventListener('keydown', e => { if (e.key === 'Enter') submitCode(); });
+
+  // ── Start ──
+  setFit(KIOSK || lsGet('autoMode') === '1');
+  tick();
   refresh();
   refreshToday();
-  setInterval(refresh, 5000);
-  setInterval(refreshToday, 60000);
+  setInterval(tick, 1000);
+  setInterval(refresh, DEMO ? 3000 : 5000);
+  setInterval(refreshToday, DEMO ? 3000 : 10000);  // pågående prints endrer tallene fortløpende
+  // Fersk data med en gang når fanen/kiosken blir synlig igjen
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { refresh(); refreshToday(); } });
+})();
 </script>
 </body>
 </html>

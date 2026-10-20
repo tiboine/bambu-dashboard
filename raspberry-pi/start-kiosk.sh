@@ -1,13 +1,13 @@
 #!/bin/bash
 # ─────────────────────────────────────────────────────────────────
 #  Bambu Lab Dashboard – Kiosk-launcher for Raspberry Pi
-#  Sjekker git-oppdateringer, starter/restarter Flask, åpner Chromium
+#  Sjekker git-oppdateringer, venter på Flask, åpner Chromium
+#  Flask kjøres av systemd-tjenesten bambu-dashboard (ikke av dette skriptet)
 # ─────────────────────────────────────────────────────────────────
 
-URL="http://localhost:5000"
+URL="http://localhost:5000/?kiosk=1"   # ?kiosk tvinger tilpass-til-skjerm-modus
 MAX_WAIT=180   # sekunder å vente på Flask (nettverksforbindelse kan ta tid)
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-APP_PY="$REPO_DIR/app.py"
 
 # ── Deaktiver skjermsparer og strømstyring ────────────────────────
 export DISPLAY="${DISPLAY:-:0}"
@@ -27,26 +27,20 @@ REMOTE=$(git rev-parse origin/master 2>/dev/null || git rev-parse origin/main 2>
 
 if [ -n "$REMOTE" ] && [ "$LOCAL" != "$REMOTE" ]; then
     echo "Ny versjon funnet – puller oppdateringer..."
-    git pull --ff-only origin "$(git rev-parse --abbrev-ref HEAD)" 2>/dev/null && \
-        echo "Oppdatering fullført (${LOCAL:0:7} → ${REMOTE:0:7})" || \
+    if git pull --ff-only origin "$(git rev-parse --abbrev-ref HEAD)" 2>/dev/null; then
+        echo "Oppdatering fullført (${LOCAL:0:7} → ${REMOTE:0:7})"
+        # Restart tjenesten kun hvis sudo fungerer uten passord
+        if sudo -n systemctl restart bambu-dashboard 2>/dev/null; then
+            echo "Tjenesten bambu-dashboard restartet"
+        else
+            echo "Kunne ikke restarte tjenesten uten passord – ny versjon tas i bruk ved neste omstart"
+        fi
+    else
         echo "Pull feilet – fortsetter med eksisterende versjon"
+    fi
 else
     echo "Ingen oppdateringer (${LOCAL:0:7})"
 fi
-
-# ── Start/restart Flask ───────────────────────────────────────────
-# Drep eventuell kjørende Flask-instans
-FLASK_PID=$(pgrep -f "python.*app.py" 2>/dev/null)
-if [ -n "$FLASK_PID" ]; then
-    echo "Stopper Flask (PID $FLASK_PID)..."
-    kill "$FLASK_PID" 2>/dev/null
-    sleep 2
-fi
-
-echo "Starter Flask..."
-cd "$REPO_DIR"
-nohup python3 app.py > /tmp/bambu-flask.log 2>&1 &
-echo "Flask PID: $!"
 
 # ── Vent til Flask svarer ─────────────────────────────────────────
 echo "Venter på Flask ($URL)..."

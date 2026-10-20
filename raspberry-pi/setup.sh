@@ -17,7 +17,7 @@ error()   { echo -e "${RED}✘ $*${NC}"; exit 1; }
 # ── Finn prosjektmappe (én katalog opp fra dette skriptet) ────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-SERVICE_USER="$USER"
+SERVICE_USER="${SUDO_USER:-$(id -un)}"   # faktisk bruker, også om skriptet kjøres med sudo
 
 echo ""
 echo "  Bambu Lab Dashboard – Raspberry Pi oppsett"
@@ -61,10 +61,18 @@ if [ ! -f "$ENV_FILE" ]; then
     read -rp "  Bambu Lab e-post: " BAMBU_EMAIL
     read -rsp "  Bambu Lab passord: " BAMBU_PASSWORD
     echo ""
-    cat > "$ENV_FILE" <<EOF
-BAMBU_EMAIL=$BAMBU_EMAIL
-BAMBU_PASSWORD=$BAMBU_PASSWORD
-EOF
+    # Siter verdier for systemd EnvironmentFile og python-dotenv:
+    # enkle anførselstegn (ingen tolkning), eller doble med escaping hvis verdien inneholder '
+    env_quote() {
+        case "$1" in
+            *"'"*) local v="${1//\\/\\\\}"; v="${v//\"/\\\"}"; printf '"%s"' "$v" ;;
+            *)     printf "'%s'" "$1" ;;
+        esac
+    }
+    {
+        echo "BAMBU_EMAIL=$(env_quote "$BAMBU_EMAIL")"
+        echo "BAMBU_PASSWORD=$(env_quote "$BAMBU_PASSWORD")"
+    } > "$ENV_FILE"
     chmod 600 "$ENV_FILE"
     success ".env opprettet"
 else
@@ -75,19 +83,24 @@ fi
 SERVICE_FILE="/etc/systemd/system/bambu-dashboard.service"
 info "Installerer systemd-tjeneste..."
 
+# Sørg for at time-sync.target venter på faktisk klokkesynk (ignorer hvis ikke tilgjengelig)
+sudo systemctl enable systemd-time-wait-sync.service 2>/dev/null || true
+
+# Holdes lik raspberry-pi/bambu-dashboard.service
 sudo tee "$SERVICE_FILE" > /dev/null <<EOF
 [Unit]
 Description=Bambu Lab 3D Print Dashboard
-After=network-online.target
-Wants=network-online.target
+# Vent på nettverk og synkronisert klokke (ellers TLS-feil "certificate is not yet valid")
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
 
 [Service]
 Type=simple
 User=$SERVICE_USER
 WorkingDirectory=$PROJECT_DIR
 ExecStart=$VENV_DIR/bin/python app.py
-Restart=on-failure
-RestartSec=10
+Restart=always
+RestartSec=5
 EnvironmentFile=$ENV_FILE
 
 [Install]
