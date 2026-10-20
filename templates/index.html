@@ -731,6 +731,7 @@
 
   // ── Polling ──
   let inFlight = false;
+  let appVersion = null;  // serverens versjon da siden ble lastet
   async function refresh() {
     if (inFlight) return;
     inFlight = true;
@@ -747,6 +748,17 @@
         const res = await fetch('/api/status', { cache: 'no-store' });
         if (!res.ok) throw new Error('HTTP ' + res.status);
         data = await res.json();
+      }
+
+      // Ny app-versjon på serveren (git pull + restart) → last siden på nytt,
+      // så kiosken får nytt design/ny kode uten reboot. Ikke midt i kode-innskriving.
+      if (data.app_version) {
+        if (appVersion && data.app_version !== appVersion && !data.needs_verify_code) {
+          console.info('[dashboard] Ny versjon', data.app_version, '– laster på nytt');
+          location.reload();
+          return;
+        }
+        appVersion = data.app_version;
       }
 
       setHidden($('#verify'), !data.needs_verify_code);
