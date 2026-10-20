@@ -23,8 +23,9 @@
     }
 
     /* Tilpass-til-skjerm (kiosk): alt skal synes uten scrolling */
+    html:has(body.fit) { overflow: hidden; }
     body.fit { height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
-    body.fit main { flex: 1; min-height: 0; padding: 0.75rem; display: flex; flex-direction: column; }
+    body.fit main { flex: 1; min-height: 0; padding: 0.75rem; display: flex; flex-direction: column; overflow: hidden; }
     body.fit .grid {
       flex: 1;
       min-height: 0;
@@ -36,6 +37,22 @@
     }
     body.fit .card { width: var(--card-w, 280px); height: var(--card-h, 340px); }
     body.fit .card-visual { flex: 1 1 0; height: auto; min-height: 0; }
+    /* Kortet har fast størrelse i tilpass-modus → innholdet kan tilpasse seg høyden */
+    body.fit .card { container-type: size; }
+    @container (max-height: 300px) {
+      .card .card-model { display: none; }
+      .card .card-head { padding: 0.5rem 0.7rem 0.2rem; }
+      .card .card-visual { margin: 0.1rem 0.7rem 0; min-height: 44px; }
+      .card .card-job { margin: 0.3rem 0.7rem 0; }
+      .card .card-main { padding: 0.25rem 0.7rem 0.1rem; }
+      .card .readout { min-height: 0; }
+      .card .bar { margin-top: 0.35rem; }
+      .card .card-meta { padding: 0.35rem 0.7rem 0.5rem; }
+    }
+    @container (max-height: 230px) {
+      .card .card-meta, .card .card-job { display: none; }
+      .card .card-main { padding-bottom: 0.55rem; }
+    }
 
     /* ── Printerkort ────────────────────────────────────────── */
     .card {
@@ -152,6 +169,33 @@
       transition: opacity .5s, filter .5s;
     }
     .card:not(.has-job):not([data-state="done"]) .thumb { opacity: 0.32; filter: grayscale(1); }
+
+    /* ── Hologram: forhåndsbildet vipper rolig og svever mens printeren jobber ── */
+    .card-visual { perspective: 520px; }
+    .card[data-state="printing"] .thumb,
+    .card[data-state="paused"] .thumb {
+      animation: holo-sway 4.8s ease-in-out var(--holo-delay, 0s) infinite alternate;
+      will-change: transform;
+    }
+    .card[data-state="paused"] .thumb { animation-play-state: paused; }
+    .card[data-state="printing"] .card-visual::after {
+      content: '';
+      position: absolute;
+      left: 0; right: 0; top: 0;
+      height: 35%;
+      background: linear-gradient(180deg, transparent, rgba(var(--accent-rgb), 0.14), transparent);
+      animation: holo-scan 3.4s linear var(--holo-delay, 0s) infinite;
+      pointer-events: none;
+    }
+    @keyframes holo-sway {
+      0%   { transform: rotateY(-26deg) translateY(2px); }
+      50%  { transform: rotateY(0deg)   translateY(-5px); }
+      100% { transform: rotateY(26deg)  translateY(2px); }
+    }
+    @keyframes holo-scan {
+      from { transform: translateY(-100%); }
+      to   { transform: translateY(300%); }
+    }
     .card.has-thumb .placeholder { display: none; }
     .placeholder { width: 34%; max-width: 74px; height: auto; color: rgba(var(--accent-rgb), 0.55); }
 
@@ -537,6 +581,7 @@
   function createCard(id) {
     const el = $('#card-tpl').content.firstElementChild.cloneNode(true);
     el.dataset.dev = id;
+    el.style.setProperty('--holo-delay', -(Math.random() * 9).toFixed(2) + 's');  // ikke i takt
     el._ = {
       fill: $('.card-fill', el), name: $('.card-name', el), model: $('.card-model', el),
       chip: $('.chip-text', el), thumb: $('.thumb', el),
@@ -782,32 +827,28 @@
           return el;
         }));
       }
-      setHidden(bar, false);
+      if (bar.hidden) { setHidden(bar, false); layoutFit(); }
     } catch (e) {}
   }
 
   // ── Tilpass-til-skjerm: finn kolonner/rader som gir størst mulige kort ──
   let fit = false;
+  // Antall kort per rad i tilpass-til-skjerm: ?cols=N, ellers 5 (15 printere = 3 hele rader)
+  const FIT_COLS = Math.max(1, Math.min(10, parseInt(params.get('cols'), 10) || 5));
+
   function layoutFit() {
     if (!fit) return;
     const n = cards.size;
     if (!n) return;
     const gap = parseFloat(getComputedStyle(grid).columnGap) || 12;
     const W = grid.clientWidth, H = grid.clientHeight;
-    const ratio = 0.82;  // ønsket bredde/høyde for et kort
-    let best = null;
-    for (let cols = 1; cols <= n; cols++) {
-      const rows = Math.ceil(n / cols);
-      const w = (W - gap * (cols - 1)) / cols;
-      const h = (H - gap * (rows - 1)) / rows;
-      if (w <= 0 || h <= 0) continue;
-      const cw = Math.min(w, h * ratio * 1.35);   // tillat litt bredere kort enn idealet
-      const score = Math.min(cw, h * ratio);
-      if (!best || score > best.score) best = { score, w: cw, h };
-    }
-    if (!best) return;
-    grid.style.setProperty('--card-w', Math.floor(best.w) + 'px');
-    grid.style.setProperty('--card-h', Math.floor(best.h) + 'px');
+    const cols = Math.min(n, FIT_COLS);
+    const rows = Math.ceil(n / cols);
+    const w = (W - gap * (cols - 1)) / cols;
+    const h = (H - gap * (rows - 1)) / rows;
+    if (w <= 0 || h <= 0) return;
+    grid.style.setProperty('--card-w', Math.floor(w) + 'px');
+    grid.style.setProperty('--card-h', Math.floor(h) - 1 + 'px');  // -1: aldri overflyt pga. avrunding
   }
 
   function setFit(on) {
@@ -820,6 +861,14 @@
   $('#fit-btn').addEventListener('click', () => { setFit(!fit); lsSet('autoMode', fit ? '1' : '0'); });
   let resizeTimer;
   window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(layoutFit, 120); });
+  // Alt som endrer plassen til kortene (banner, I dag-stripen, fullskjerm) gir ny utregning
+  if (window.ResizeObserver) {
+    let lastH = 0;
+    new ResizeObserver(() => {
+      const h = grid.clientHeight;
+      if (fit && Math.abs(h - lastH) > 1) { lastH = h; layoutFit(); }
+    }).observe(grid);
+  }
 
   // ── Tema / fullskjerm ──
   $('#theme-btn').addEventListener('click', () => {

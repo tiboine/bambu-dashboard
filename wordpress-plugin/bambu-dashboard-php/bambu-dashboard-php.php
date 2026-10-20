@@ -3,7 +3,7 @@
  * Plugin Name: Bambu Lab 3D Print Dashboard (PHP)
  * Plugin URI: https://makerspaceringebu.no
  * Description: Sanntids 3D-print dashboard for Bambu Lab – ren PHP, ingen ekstern server nødvendig. Bruk [bambu_dashboard] og [bambu_stats].
- * Version: 1.5.3
+ * Version: 1.5.5
  * Author: Makerspace Ringebu
  * License: GPL v2 or later
  * Text Domain: bambu-dashboard-php
@@ -15,7 +15,7 @@ class BambuDashboardPHP {
 
     private static $instance = null;
     const API        = 'https://api.bambulab.com';
-    const VERSION    = '1.5.3';
+    const VERSION    = '1.5.5';
     const DB_VERSION = '1';
     const TEMPLATE   = 'bambu-dashboard-php/templates/fullscreen.php';
     const CRON_HOOK  = 'bambu_php_cron';
@@ -244,11 +244,12 @@ class BambuDashboardPHP {
             }
         }
 
-        // Nyeste cover-bilder
-        $covers = [];
+        // Nyeste task per printer (bilde + start/slutt). Ikke fall tilbake på bildet
+        // fra en eldre print hvis den nyeste mangler bilde.
+        $latest = [];
         foreach (($this->fetch_task_page())['hits'] as $t) {
             $did = $t['deviceId'] ?? null;
-            if ($did && !isset($covers[$did]) && ($t['cover'] ?? null)) $covers[$did] = $t['cover'];
+            if ($did && !isset($latest[$did])) $latest[$did] = $t;
         }
 
         // Slå sammen
@@ -269,16 +270,38 @@ class BambuDashboardPHP {
                 $time_remaining = max(0, (int)($estimated - $elapsed));
             }
 
+            $status    = strtoupper((string) ($dev['print_status'] ?? ''));
+            $online    = (bool) ($dev['online'] ?? false);
+            $task      = $latest[$dev_id] ?? [];
+            $thumbnail = ($task['cover'] ?? null) ?: null;
+            $task_name = $pd['task_name'] ?? null;
+
+            // Printeren rapporterer FAILED/SUCCESS helt til neste jobb starter.
+            // Etter en stund er den bare ledig – ikke vis forrige print.
+            if (in_array($status, ['FAIL', 'FAILED', 'SUCCESS', 'FINISH'], true)) {
+                $ended = $this->to_timestamp($task['endTime'] ?? null);
+                $keep  = in_array($status, ['FAIL', 'FAILED'], true) ? 15 * MINUTE_IN_SECONDS : 5 * MINUTE_IN_SECONDS;
+                if (!$ended || time() - $ended > $keep) $status = 'IDLE';
+            }
+            // Ny jobb, men nyeste kjente task startet før den → bildet er fra forrige print
+            $job_start  = $start_time ? (int) ($start_time / 1000) : null;
+            $task_start = $this->to_timestamp($task['startTime'] ?? null);
+            if ($job_start && $task_start && $task_start < $job_start - 300) $thumbnail = null;
+            // Ledig/offline: ingen jobbdata fra forrige print
+            if ($status === 'IDLE' || $status === '' || !$online) {
+                $thumbnail = $task_name = $progress = $time_remaining = null;
+            }
+
             $printers[] = [
                 'id'             => $dev_id,
                 'name'           => $dev['name']             ?? $dev_id,
                 'model'          => $dev['dev_product_name'] ?? 'Ukjent',
-                'online'         => $dev['online']           ?? false,
-                'print_status'   => $dev['print_status']     ?? '',
-                'task_name'      => $pd['task_name']         ?? null,
+                'online'         => $online,
+                'print_status'   => $status,
+                'task_name'      => $task_name,
                 'progress'       => $progress,
                 'time_remaining' => $time_remaining,
-                'thumbnail'      => $covers[$dev_id] ?? ($pd['thumbnail'] ?? null),
+                'thumbnail'      => $thumbnail,
                 // MQTT-data ikke tilgjengelig i PHP-versjon
                 'nozzle_temp'    => null,
                 'bed_temp'       => null,
