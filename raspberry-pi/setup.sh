@@ -24,6 +24,10 @@ echo "  Bambu Lab Dashboard – Raspberry Pi oppsett"
 echo "  Prosjektmappe: $PROJECT_DIR"
 echo ""
 
+# ── 0. Riktig klokke først (ellers feiler apt med "Not live until …") ──
+info "Sjekker klokka..."
+sudo bash "$SCRIPT_DIR/http-timesync.sh"
+
 # ── 1. Systemavhengigheter ────────────────────────────────────────
 info "Oppdaterer pakkeliste..."
 sudo apt-get update -qq
@@ -83,16 +87,49 @@ fi
 SERVICE_FILE="/etc/systemd/system/bambu-dashboard.service"
 info "Installerer systemd-tjeneste..."
 
-# Sørg for at time-sync.target venter på faktisk klokkesynk (ignorer hvis ikke tilgjengelig)
-sudo systemctl enable systemd-time-wait-sync.service 2>/dev/null || true
+# Klokke: NTP er ofte blokkert på skole-/bedriftsnett. msr-timesync setter klokka
+# fra en nettside ved oppstart og hver time hvis NTP ikke har synkronisert.
+# (systemd-time-wait-sync slås av – den kan vente for alltid når NTP er blokkert.)
+chmod +x "$SCRIPT_DIR/http-timesync.sh"
+sudo systemctl disable systemd-time-wait-sync.service 2>/dev/null || true
+sudo tee /etc/systemd/system/msr-timesync.service > /dev/null <<EOF
+[Unit]
+Description=Sett klokka fra HTTP hvis NTP er blokkert
+After=network-online.target
+Wants=network-online.target
+Before=bambu-dashboard.service
+
+[Service]
+Type=oneshot
+ExecStart=$SCRIPT_DIR/http-timesync.sh
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo tee /etc/systemd/system/msr-timesync.timer > /dev/null <<EOF
+[Unit]
+Description=Sjekk klokka hver time
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable msr-timesync.service msr-timesync.timer
+sudo systemctl start msr-timesync.service msr-timesync.timer || true
+success "Klokkesynk installert (msr-timesync)"
 
 # Holdes lik raspberry-pi/bambu-dashboard.service
 sudo tee "$SERVICE_FILE" > /dev/null <<EOF
 [Unit]
 Description=Bambu Lab 3D Print Dashboard
-# Vent på nettverk og synkronisert klokke (ellers TLS-feil "certificate is not yet valid")
-After=network-online.target time-sync.target
-Wants=network-online.target time-sync.target
+# Vent på nettverk og riktig klokke (ellers TLS-feil "certificate is not yet valid")
+After=network-online.target msr-timesync.service
+Wants=network-online.target msr-timesync.service
 
 [Service]
 Type=simple
