@@ -332,7 +332,7 @@
   <div class="hud-brand">
     <img src="https://www.makerspaceringebu.no/wp-content/uploads/2021/05/MSR_navnetrekk-liggende-svart.png" alt="Makerspace Ringebu" />
     <span class="hud-brand-tag">3D-print status</span>
-    <span class="hud-version" id="version" title="Versjon {{ build.label }}, laget {{ build.date }}">{{ build.label }}</span>
+    {% if build is defined and build %}<span class="hud-version" id="version" title="Versjon {{ build.label }}, laget {{ build.date }}">{{ build.label }}</span>{% endif %}
   </div>
 
   <div class="hud-stats" id="hud-stats"></div>
