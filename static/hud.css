@@ -121,6 +121,14 @@ html[data-theme="light"] .hud-header {
 
 .hud-brand { display: flex; align-items: center; gap: 0.9rem; flex-shrink: 0; }
 .hud-brand img { height: 30px; filter: brightness(0) invert(1); opacity: 0.92; }
+.hud-version {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-faint);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.hud-version.is-warn { color: var(--amber); }
 .hud-brand-tag {
   font-size: 0.68rem;
   font-weight: 600;
@@ -302,7 +310,7 @@ html[data-theme="light"] .hud-header {
 
 /* ── Responsivt ──────────────────────────────────────────────── */
 @media (max-width: 1100px) {
-  .hud-brand-tag, .hud-live-text { display: none; }
+  .hud-brand-tag, .hud-live-text, .hud-version { display: none; }
 }
 @media (max-width: 820px) {
   :root { --header-h: auto; }

@@ -332,6 +332,7 @@
   <div class="hud-brand">
     <img src="https://www.makerspaceringebu.no/wp-content/uploads/2021/05/MSR_navnetrekk-liggende-svart.png" alt="Makerspace Ringebu" />
     <span class="hud-brand-tag">3D-print status</span>
+    <span class="hud-version" id="version" title="Versjon {{ build.label }}, laget {{ build.date }}">{{ build.label }}</span>
   </div>
 
   <div class="hud-stats" id="hud-stats"></div>
@@ -749,6 +750,7 @@
       appVersion = data.app_version;
     }
 
+    updateVersion(data);
     setHidden($('#verify'), !data.needs_verify_code);
     if (data.needs_verify_code) {
       setLive('error', 'Venter på kode');
@@ -780,6 +782,27 @@
     setHidden($('#empty'), printers.length > 0);
     applyCards(printers);
     updateHudStats(printers);
+  }
+
+  // ── Versjon + status for automatisk oppdatering (hold musepekeren over versjonen) ──
+  function updateVersion(data) {
+    const el = $('#version');
+    if (!el || !data.build) return;
+    const u = data.update;
+    let title = `Versjon ${data.build.label}, laget ${data.build.date}`;
+    let warn = false;
+    if (u) {
+      const when = new Date(u.time * 1000);
+      const hm = String(when.getHours()).padStart(2, '0') + ':' + String(when.getMinutes()).padStart(2, '0');
+      title += `\nSist sjekket for oppdatering ${hm}: ${u.message}`;
+      if (u.stale) title += '\n⚠ Ingen sjekk på over 30 min – oppdateringen kjører trolig ikke (start Pi-en på nytt)';
+      warn = u.stale || ['skipped', 'rolledback', 'error'].includes(u.state);
+    } else {
+      title += '\nAutomatisk oppdatering har ikke kjørt ennå';
+    }
+    setText(el, data.build.label + (warn ? ' ⚠' : ''));
+    if (el.title !== title) el.title = title;
+    el.classList.toggle('is-warn', warn);
   }
 
   function setLive(kind, text) {
