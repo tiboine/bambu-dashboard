@@ -92,6 +92,24 @@ def load_stats_store():
     print("[Stats] Lagring er korrupt – lagring deaktivert til filene er fikset")
     return default_stats_store()
 
+_store_cache = {"key": None, "store": None}
+_store_cache_lock = threading.Lock()
+
+def load_stats_store_cached():
+    """Som load_stats_store, men parser filen bare når den har endret seg.
+    Kun for lesing – returnert objekt deles og må ikke endres."""
+    try:
+        st = STATS_FILE.stat()
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = None  # filen mangler – les på vanlig måte (kan bruke .bak)
+    with _store_cache_lock:
+        if key is not None and _store_cache["key"] == key:
+            return _store_cache["store"]
+        store = load_stats_store()
+        _store_cache["key"], _store_cache["store"] = key, store
+        return store
+
 def save_stats_store(store):
     if _store_unreadable:
         print("[Stats] Hopper over lagring (eksisterende fil er uleselig)")
@@ -972,7 +990,7 @@ def api_today():
     """Dagens printstatistikk: ferdige prints i dag + pågående prints regnet ut fra fremdrift."""
     now = datetime.now(timezone.utc)
     today = now.astimezone().date()  # lokal dato
-    store = load_stats_store()
+    store = load_stats_store_cached()
     prints = 0
     weight = 0.0
     time_s = 0
@@ -1038,7 +1056,7 @@ def stats_page():
 @app.route("/api/stats")
 def api_stats():
     """Returner akkumulert statistikk fra lokal lagring."""
-    store = load_stats_store()
+    store = load_stats_store_cached()
     agg = aggregate_stats(store)
     total = sum(d["total_prints"] for d in agg.values())
     # Printere som ikke lenger er koblet til kontoen telles i totalene, men får ikke eget kort.

@@ -72,15 +72,23 @@ body {
   font-family: var(--font-display);
   color: var(--text);
   background-color: var(--bg);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+/* Bakgrunnen ligger i et eget fast lag. «background-attachment: fixed» ville
+   tvunget nettleseren til å male hele siden på nytt oftere. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
   background-image:
     radial-gradient(1200px 600px at 0% -10%, var(--bg-glow-a), transparent 60%),
     radial-gradient(1000px 700px at 110% 110%, var(--bg-glow-b), transparent 60%),
     linear-gradient(var(--grid-line) 1px, transparent 1px),
     linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
   background-size: auto, auto, 44px 44px, 44px 44px;
-  background-attachment: fixed;
-  min-height: 100vh;
-  -webkit-font-smoothing: antialiased;
 }
 
 .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }

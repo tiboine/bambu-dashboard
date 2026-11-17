@@ -86,6 +86,9 @@ exec "$CHROMIUM" \
     --start-fullscreen \
     --force-device-scale-factor=1 \
     --disable-dev-shm-usage \
+    --ignore-gpu-blocklist \
+    --enable-gpu-rasterization \
+    --enable-zero-copy \
     --no-sandbox \
     2>/dev/null \
     "$URL"

@@ -80,7 +80,7 @@
       transform: scaleX(0);
       background: linear-gradient(90deg, rgba(var(--accent-rgb), 0.01), rgba(var(--accent-rgb), 0.065));
       border-right: 1px solid rgba(var(--accent-rgb), 0.35);
-      transition: transform 4.5s linear, opacity .4s;
+      transition: transform .8s ease-out, opacity .4s;
       pointer-events: none;
       opacity: 0;
     }
@@ -165,36 +165,23 @@
       max-width: 88%;
       max-height: 92%;
       object-fit: contain;
-      filter: drop-shadow(0 6px 16px rgba(var(--accent-rgb), 0.18));
-      transition: opacity .5s, filter .5s;
+      transition: opacity .5s;
     }
     .card:not(.has-job):not([data-state="done"]) .thumb { opacity: 0.32; filter: grayscale(1); }
 
-    /* ── Hologram: forhåndsbildet vipper rolig og svever mens printeren jobber ── */
-    .card-visual { perspective: 520px; }
+    /* ── Hologram: forhåndsbildet roterer 360° mens printeren jobber ──
+       Kun transform animeres (ingen filter/skygge på det roterende bildet),
+       så nettleseren slipper å tegne bildet på nytt i hver frame. */
+    .card-visual { perspective: 600px; }
     .card[data-state="printing"] .thumb,
     .card[data-state="paused"] .thumb {
-      animation: holo-sway 4.8s ease-in-out var(--holo-delay, 0s) infinite alternate;
+      animation: holo-spin 12s linear var(--holo-delay, 0s) infinite;
       will-change: transform;
     }
     .card[data-state="paused"] .thumb { animation-play-state: paused; }
-    .card[data-state="printing"] .card-visual::after {
-      content: '';
-      position: absolute;
-      left: 0; right: 0; top: 0;
-      height: 35%;
-      background: linear-gradient(180deg, transparent, rgba(var(--accent-rgb), 0.14), transparent);
-      animation: holo-scan 3.4s linear var(--holo-delay, 0s) infinite;
-      pointer-events: none;
-    }
-    @keyframes holo-sway {
-      0%   { transform: rotateY(-26deg) translateY(2px); }
-      50%  { transform: rotateY(0deg)   translateY(-5px); }
-      100% { transform: rotateY(26deg)  translateY(2px); }
-    }
-    @keyframes holo-scan {
-      from { transform: translateY(-100%); }
-      to   { transform: translateY(300%); }
+    @keyframes holo-spin {
+      from { transform: rotateY(0deg); }
+      to   { transform: rotateY(360deg); }
     }
     .card.has-thumb .placeholder { display: none; }
     .placeholder { width: 34%; max-width: 74px; height: auto; color: rgba(var(--accent-rgb), 0.55); }
@@ -253,20 +240,8 @@
       background: linear-gradient(90deg, rgba(var(--accent-rgb), 0.55), var(--accent));
       box-shadow: 0 0 12px var(--accent);
       border-radius: inherit;
-      transition: transform 4.5s linear;
+      transition: transform .8s ease-out;
     }
-    .bar::after {
-      /* lysende "sveip" over baren mens den printer */
-      content: '';
-      position: absolute;
-      top: 0; bottom: 0;
-      width: 30%;
-      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.45), transparent);
-      transform: translateX(-120%);
-      opacity: 0;
-    }
-    .card[data-state="printing"] .bar::after { opacity: 1; animation: sweep 2.6s linear infinite; }
-    @keyframes sweep { to { transform: translateX(420%); } }
     .bar-ticks {
       position: absolute;
       inset: 0;
@@ -581,7 +556,7 @@
   function createCard(id) {
     const el = $('#card-tpl').content.firstElementChild.cloneNode(true);
     el.dataset.dev = id;
-    el.style.setProperty('--holo-delay', -(Math.random() * 9).toFixed(2) + 's');  // ikke i takt
+    el.style.setProperty('--holo-delay', -(Math.random() * 12).toFixed(2) + 's');  // ikke i takt
     el._ = {
       fill: $('.card-fill', el), name: $('.card-name', el), model: $('.card-model', el),
       chip: $('.chip-text', el), thumb: $('.thumb', el),
@@ -859,8 +834,10 @@
     const w = (W - gap * (cols - 1)) / cols;
     const h = (H - gap * (rows - 1)) / rows;
     if (w <= 0 || h <= 0) return;
-    grid.style.setProperty('--card-w', Math.floor(w) + 'px');
-    grid.style.setProperty('--card-h', Math.floor(h) - 1 + 'px');  // -1: aldri overflyt pga. avrunding
+    // Skriv bare når størrelsen endres – ellers må alle kortene style-beregnes på nytt hver runde
+    const cw = Math.floor(w) + 'px', ch = Math.floor(h) - 1 + 'px';  // -1: aldri overflyt pga. avrunding
+    if (grid.style.getPropertyValue('--card-w') !== cw) grid.style.setProperty('--card-w', cw);
+    if (grid.style.getPropertyValue('--card-h') !== ch) grid.style.setProperty('--card-h', ch);
   }
 
   function setFit(on) {
