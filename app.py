@@ -531,7 +531,7 @@ def handle_unauthorized():
         try:
             login()
         except Exception as e:
-            state["error"] = f"Innlogging feilet: {e}"
+            state["error"] = f"Innlogging feilet: {friendly_error(e)}"
             return False
         if not state["token"]:
             return False  # krever verifiseringskode
@@ -743,7 +743,7 @@ def start_mqtt():
             print(f"[MQTT] Starter tilkobling til {MQTT_BROKER}...")
         except Exception as e:
             print(f"[MQTT] Feil ved tilkobling: {e}")
-            state["error"] = f"MQTT-feil: {e}"
+            state["error"] = f"MQTT-feil: {friendly_error(e)}"
 
 
 def stop_mqtt():
@@ -957,21 +957,49 @@ def wait_for_network(timeout=60):
     return False
 
 
+def friendly_error(e):
+    """Gjør nettverksfeil fra requests om til en forståelig melding for skjermen."""
+    text = str(e)
+    if isinstance(e, requests.exceptions.SSLError) or "CERTIFICATE_VERIFY_FAILED" in text:
+        return "Sikker tilkobling til Bambu Cloud feilet – sjekk at klokka på Pi-en er riktig. Prøver igjen."
+    if isinstance(e, requests.exceptions.Timeout):
+        return "Bambu Cloud svarer ikke (tidsavbrudd). Prøver igjen automatisk."
+    if isinstance(e, requests.exceptions.ConnectionError):
+        if "NameResolution" in text or "getaddrinfo" in text or "Name or service not known" in text:
+            return "Finner ikke Bambu Cloud (DNS/internett er nede). Prøver igjen automatisk."
+        return "Får ikke kontakt med Bambu Cloud (nettverk). Prøver igjen automatisk."
+    if isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
+        code = e.response.status_code
+        if code >= 500:
+            return f"Bambu Cloud har problemer (HTTP {code}). Prøver igjen automatisk."
+        return f"Bambu Cloud avviste forespørselen (HTTP {code})."
+    return text[:200]
+
+
+def connect_cloud():
+    """Logg inn (lagret token eller passord), hent printere og start MQTT. Kaster ved feil."""
+    if not state["token"] and not load_token():
+        login()
+    if state["token"]:
+        fetch_device_list()
+        fetch_task_covers()
+        start_mqtt()
+        # Første stats-sync i bakgrunn slik at dagens tall fylles ASAP
+        threading.Thread(target=sync_stats_store, daemon=True).start()
+
+
 def init_connection():
-    """Forsøk innlogging ved oppstart. Bruker lagret token hvis tilgjengelig."""
+    """Forsøk innlogging ved oppstart. Mislykkes det, prøver poll_loop igjen."""
     wait_for_network(timeout=60)
     try:
-        if not load_token():
-            login()
-        if state["token"]:
-            fetch_device_list()
-            fetch_task_covers()
-            start_mqtt()
-            # Kjør første stats-sync i bakgrunn slik at dagens tall fylles ASAP
-            threading.Thread(target=sync_stats_store, daemon=True).start()
+        connect_cloud()
     except Exception as e:
-        state["error"] = str(e)
+        state["error"] = friendly_error(e)
         print(f"[Feil ved oppstart] {e}")
+
+
+POLL_INTERVAL       = 60   # sekunder mellom hver runde når alt virker
+POLL_RETRY_INTERVAL = 15   # raskere nytt forsøk etter en feil
 
 
 def poll_loop():
@@ -979,9 +1007,22 @@ def poll_loop():
     time.sleep(30)
     stats_tick = 0
     while True:
-        if not state["needs_verify_code"] and state["token"]:
+        failed = False
+        if state["needs_verify_code"]:
+            pass  # venter på at noen skriver inn koden
+        elif not state["token"]:
+            # Første innlogging feilet (f.eks. nettet var ikke klart) – prøv igjen
             try:
-                fetch_device_list()
+                connect_cloud()
+                if state["token"]:
+                    print("[Info] Innlogging lyktes etter tidligere feil")
+            except Exception as e:
+                state["error"] = friendly_error(e)
+                print(f"[Feil] Innlogging: {e}")
+                failed = True
+        else:
+            try:
+                fetch_device_list()   # nullstiller feilmeldingen når det lykkes
                 fetch_task_covers()
                 if mqtt_needs_restart():
                     start_mqtt()
@@ -990,9 +1031,11 @@ def poll_loop():
                 if stats_tick == 1 or stats_tick % 5 == 0:
                     threading.Thread(target=sync_stats_store, daemon=True).start()
             except Exception as e:
-                state["error"] = str(e)
+                state["error"] = friendly_error(e)
                 print(f"[Feil] {e}")
-        time.sleep(60)
+                failed = True
+        notify_change()
+        time.sleep(POLL_RETRY_INTERVAL if failed else POLL_INTERVAL)
 
 
 # ── Flask-ruter ──
