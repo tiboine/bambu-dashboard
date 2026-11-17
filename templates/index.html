@@ -156,7 +156,7 @@
     .card[data-state="printing"] .chip i { animation: hud-pulse 1.6s ease-in-out infinite; }
     .card[data-state="offline"] .chip i { box-shadow: none; }
 
-    /* Forhåndsvisning – "hologram" */
+    /* Forhåndsvisning */
     .card-visual {
       height: 140px;
       margin: 0.2rem 0.9rem 0;
@@ -174,24 +174,12 @@
       max-width: 88%;
       max-height: 92%;
       object-fit: contain;
+      /* Stillestående bilde: skyggen tegnes én gang og koster ingenting etterpå */
+      filter: drop-shadow(0 6px 16px rgba(var(--accent-rgb), 0.18));
       transition: opacity .5s;
     }
     .card:not(.has-job):not([data-state="done"]) .thumb { opacity: 0.32; filter: grayscale(1); }
 
-    /* ── Hologram: forhåndsbildet roterer 360° mens printeren jobber ──
-       Kun transform animeres (ingen filter/skygge på det roterende bildet),
-       så nettleseren slipper å tegne bildet på nytt i hver frame. */
-    .card-visual { perspective: 600px; }
-    .card[data-state="printing"] .thumb,
-    .card[data-state="paused"] .thumb {
-      animation: holo-spin 12s linear var(--holo-delay, 0s) infinite;
-      will-change: transform;
-    }
-    .card[data-state="paused"] .thumb { animation-play-state: paused; }
-    @keyframes holo-spin {
-      from { transform: rotateY(0deg); }
-      to   { transform: rotateY(360deg); }
-    }
     .card.has-thumb .placeholder { display: none; }
     .placeholder { width: 34%; max-width: 74px; height: auto; color: rgba(var(--accent-rgb), 0.55); }
 
@@ -559,7 +547,6 @@
   function createCard(id) {
     const el = $('#card-tpl').content.firstElementChild.cloneNode(true);
     el.dataset.dev = id;
-    el.style.setProperty('--holo-delay', -(Math.random() * 12).toFixed(2) + 's');  // ikke i takt
     el._ = {
       fill: $('.card-fill', el), name: $('.card-name', el), model: $('.card-model', el),
       chip: $('.chip-text', el), thumb: $('.thumb', el),
