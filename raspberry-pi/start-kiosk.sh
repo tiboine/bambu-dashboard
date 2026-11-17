@@ -37,33 +37,53 @@ fi
 unclutter -idle 0.5 -root &
 
 # ── Git-oppdatering ───────────────────────────────────────────────
-echo "Sjekker git-oppdateringer i $REPO_DIR..."
+# Kjøres ved oppstart og deretter jevnlig i bakgrunnen. Når appen restartes med ny
+# kode, laster dashboardet seg selv på nytt – ingen mus, tastatur eller omstart trengs.
+# Endringer i dette skriptet (f.eks. Chromium-flagg) tas i bruk ved neste omstart.
+UPDATE_INTERVAL="${KIOSK_UPDATE_INTERVAL:-600}"   # sekunder mellom hver sjekk (0 = av)
 cd "$REPO_DIR"
-git fetch origin 2>/dev/null
-LOCAL=$(git rev-parse HEAD 2>/dev/null)
-REMOTE=$(git rev-parse origin/master 2>/dev/null || git rev-parse origin/main 2>/dev/null)
 
-if [ -n "$REMOTE" ] && [ "$LOCAL" != "$REMOTE" ]; then
-    echo "Ny versjon funnet – puller oppdateringer..."
-    if git pull --ff-only origin "$(git rev-parse --abbrev-ref HEAD)" 2>/dev/null; then
-        echo "Oppdatering fullført (${LOCAL:0:7} → ${REMOTE:0:7})"
-        # Nye Python-pakker i requirements.txt (appen klarer seg uten dem til de er på plass)
-        if [ -x "$REPO_DIR/.venv/bin/pip" ]; then
-            "$REPO_DIR/.venv/bin/pip" install -q -r "$REPO_DIR/requirements.txt" \
-                && echo "Python-pakker oppdatert" \
-                || echo "Kunne ikke oppdatere Python-pakker – fortsetter"
-        fi
-        # Restart tjenesten kun hvis sudo fungerer uten passord
-        if sudo -n systemctl restart bambu-dashboard 2>/dev/null; then
-            echo "Tjenesten bambu-dashboard restartet"
-        else
-            echo "Kunne ikke restarte tjenesten uten passord – ny versjon tas i bruk ved neste omstart"
-        fi
-    else
-        echo "Pull feilet – fortsetter med eksisterende versjon"
+update_repo() {
+    git fetch -q origin 2>/dev/null || { echo "Fikk ikke kontakt med GitHub – prøver igjen senere"; return; }
+    local LOCAL REMOTE
+    LOCAL=$(git rev-parse HEAD 2>/dev/null)
+    REMOTE=$(git rev-parse origin/master 2>/dev/null || git rev-parse origin/main 2>/dev/null)
+    if [ -z "$REMOTE" ] || [ "$LOCAL" = "$REMOTE" ]; then
+        echo "Ingen oppdateringer (${LOCAL:0:7})"
+        return
     fi
-else
-    echo "Ingen oppdateringer (${LOCAL:0:7})"
+    echo "Ny versjon funnet – puller oppdateringer..."
+    if ! git pull -q --ff-only origin "$(git rev-parse --abbrev-ref HEAD)" 2>/dev/null; then
+        echo "Pull feilet – fortsetter med eksisterende versjon"
+        return
+    fi
+    echo "Oppdatering fullført (${LOCAL:0:7} → ${REMOTE:0:7})"
+    # Nye Python-pakker i requirements.txt (appen klarer seg uten dem til de er på plass)
+    if [ -x "$REPO_DIR/.venv/bin/pip" ]; then
+        "$REPO_DIR/.venv/bin/pip" install -q -r "$REPO_DIR/requirements.txt" \
+            && echo "Python-pakker oppdatert" \
+            || echo "Kunne ikke oppdatere Python-pakker – fortsetter"
+    fi
+    # Restart tjenesten kun hvis sudo fungerer uten passord
+    if sudo -n systemctl restart bambu-dashboard 2>/dev/null; then
+        echo "Tjenesten bambu-dashboard restartet"
+    else
+        echo "Kunne ikke restarte tjenesten uten passord – ny versjon tas i bruk ved neste omstart"
+    fi
+}
+
+echo "Sjekker git-oppdateringer i $REPO_DIR..."
+update_repo
+
+# Bakgrunnssjekk mens kiosken kjører. flock hindrer at det startes flere
+# løkker hvis kiosk-skriptet kjøres på nytt uten omstart.
+if [ "$UPDATE_INTERVAL" -gt 0 ] 2>/dev/null && command -v flock >/dev/null 2>&1; then
+    (
+        flock -n 9 || exit 0
+        while sleep "$UPDATE_INTERVAL"; do
+            cd "$REPO_DIR" && update_repo
+        done
+    ) 9>"/tmp/bambu-dashboard-update.lock" >>"/tmp/bambu-dashboard-update.log" 2>&1 &
 fi
 
 # ── Vent til Flask svarer ─────────────────────────────────────────
