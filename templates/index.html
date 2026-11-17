@@ -96,14 +96,15 @@
       opacity: 0;
       pointer-events: none;
     }
-    .card[data-state="failed"] .card-alert { animation: alert-blink 0.9s ease-in-out infinite; }
-    .card[data-state="paused"] .card-alert { animation: alert-blink 1.4s ease-in-out infinite; }
-    .card[data-state="done"]   .card-alert { animation: alert-blink 2s ease-in-out infinite; }
+    /* --blink-delay settes av JS så alle kort i samme tilstand blinker i takt */
+    .card[data-state="failed"] .card-alert { animation: alert-blink 0.9s ease-in-out var(--blink-delay, 0s) infinite; }
+    .card[data-state="paused"] .card-alert { animation: alert-blink 1.4s ease-in-out var(--blink-delay, 0s) infinite; }
+    .card[data-state="done"]   .card-alert { animation: alert-blink 2s ease-in-out var(--blink-delay, 0s) infinite; }
     @keyframes alert-blink { 0%, 100% { opacity: 0.1; } 50% { opacity: 1; } }
     /* Status-chipen blinker i takt, så det synes også på avstand */
     .card[data-state="failed"] .chip,
     .card[data-state="paused"] .chip,
-    .card[data-state="done"]   .chip { animation: chip-blink 0.9s steps(1, end) infinite; }
+    .card[data-state="done"]   .chip { animation: chip-blink 0.9s steps(1, end) var(--blink-delay, 0s) infinite; }
     .card[data-state="paused"] .chip { animation-duration: 1.4s; }
     .card[data-state="done"]   .chip { animation-duration: 2s; }
     @keyframes chip-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
@@ -581,13 +582,25 @@
     pre.src = url;
   }
 
+  // Blinking i takt: animasjonen starter når kortet bytter tilstand, altså til ulike
+  // tider. En negativ forsinkelse lik «nå modulo periode» gjør at alle kort med samme
+  // tilstand står i samme fase, uansett når de begynte å blinke.
+  const BLINK_MS = { failed: 900, paused: 1400, done: 2000 };  // samme som i CSS
+  function syncBlink(card, state) {
+    const period = BLINK_MS[state];
+    if (period) card.style.setProperty('--blink-delay', -(performance.now() % period).toFixed(0) + 'ms');
+  }
+
   function updateCard(card, p) {
     const r = card._;
     const state = stateOf(p);
     const hasJob = state === 'printing' || state === 'paused' || state === 'failed';
     const progress = p.progress != null && !isNaN(parseFloat(p.progress)) ? Math.max(0, Math.min(100, parseFloat(p.progress))) : null;
 
-    if (card.dataset.state !== state) card.dataset.state = state;
+    if (card.dataset.state !== state) {
+      card.dataset.state = state;
+      syncBlink(card, state);
+    }
     card.classList.toggle('has-job', hasJob && progress != null);
 
     setText(r.name, p.name || p.id);
