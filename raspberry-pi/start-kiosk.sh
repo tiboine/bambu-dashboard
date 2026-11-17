@@ -15,6 +15,24 @@ xset s off          2>/dev/null || true
 xset s noblank      2>/dev/null || true
 xset -dpms          2>/dev/null || true
 
+# ── Maks 1080p: en 4K-skjerm gir Pi-en fire ganger så mange piksler å tegne ──
+# Slå av med KIOSK_MAX_1080P=0 (f.eks. i ~/.profile) hvis du vil ha full oppløsning.
+if [ "${KIOSK_MAX_1080P:-1}" = "1" ]; then
+    if [ -n "$WAYLAND_DISPLAY" ] && command -v wlr-randr >/dev/null 2>&1; then
+        OUT=$(wlr-randr 2>/dev/null | awk '/^[^ ]/{print $1; exit}')
+        CUR_W=$(wlr-randr 2>/dev/null | awk '/current/{split($1,a,"x"); print a[1]; exit}')
+        if [ -n "$OUT" ] && [ "${CUR_W:-0}" -gt 1920 ] && wlr-randr 2>/dev/null | grep -q " 1920x1080 px"; then
+            wlr-randr --output "$OUT" --mode 1920x1080 2>/dev/null && echo "Oppløsning satt til 1920x1080 ($OUT)"
+        fi
+    elif command -v xrandr >/dev/null 2>&1; then
+        OUT=$(xrandr --query 2>/dev/null | awk '/ connected/{print $1; exit}')
+        CUR_W=$(xrandr --query 2>/dev/null | awk '/\*/{split($1,a,"x"); print a[1]; exit}')
+        if [ -n "$OUT" ] && [ "${CUR_W:-0}" -gt 1920 ] && xrandr --query 2>/dev/null | grep -q "^ *1920x1080 "; then
+            xrandr --output "$OUT" --mode 1920x1080 2>/dev/null && echo "Oppløsning satt til 1920x1080 ($OUT)"
+        fi
+    fi
+fi
+
 # ── Skjul musepeker ───────────────────────────────────────────────
 unclutter -idle 0.5 -root &
 
@@ -29,6 +47,12 @@ if [ -n "$REMOTE" ] && [ "$LOCAL" != "$REMOTE" ]; then
     echo "Ny versjon funnet – puller oppdateringer..."
     if git pull --ff-only origin "$(git rev-parse --abbrev-ref HEAD)" 2>/dev/null; then
         echo "Oppdatering fullført (${LOCAL:0:7} → ${REMOTE:0:7})"
+        # Nye Python-pakker i requirements.txt (appen klarer seg uten dem til de er på plass)
+        if [ -x "$REPO_DIR/.venv/bin/pip" ]; then
+            "$REPO_DIR/.venv/bin/pip" install -q -r "$REPO_DIR/requirements.txt" \
+                && echo "Python-pakker oppdatert" \
+                || echo "Kunne ikke oppdatere Python-pakker – fortsetter"
+        fi
         # Restart tjenesten kun hvis sudo fungerer uten passord
         if sudo -n systemctl restart bambu-dashboard 2>/dev/null; then
             echo "Tjenesten bambu-dashboard restartet"

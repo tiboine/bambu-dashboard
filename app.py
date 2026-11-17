@@ -6,13 +6,21 @@ import shutil
 import socket
 import threading
 import base64
+import hashlib
+import io
+from collections import OrderedDict
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 import requests
 import paho.mqtt.client as mqtt
-from flask import Flask, jsonify, render_template, request as flask_request
+from flask import Flask, Response, jsonify, render_template, request as flask_request
 from dotenv import load_dotenv
 from pathlib import Path
+
+try:
+    from PIL import Image  # valgfri: uten Pillow sendes forhåndsbildene i original størrelse
+except ImportError:
+    Image = None
 
 load_dotenv()
 
@@ -363,6 +371,16 @@ _state_lock = threading.RLock()    # beskytter state["devices"] og state["mqtt_s
 _mqtt_down_since = None            # tidspunkt MQTT sist mistet/manglet forbindelse
 MQTT_RESTART_AFTER = 300           # sekunder frakoblet før vi lager ny klient (ellers reconnecter paho selv)
 
+# ── Endringsvarsel: live-strømmen (/api/stream) venter på denne i stedet for å spørre ──
+_changed = threading.Condition()
+_change_seq = 0
+
+def notify_change():
+    global _change_seq
+    with _changed:
+        _change_seq += 1
+        _changed.notify_all()
+
 
 # ── Token-persistering ──
 
@@ -571,6 +589,7 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
     state["mqtt_connected"] = True
     state["error"] = None
     _mqtt_down_since = None
+    notify_change()
 
     with _state_lock:
         dev_ids = list(state["devices"])
@@ -604,6 +623,7 @@ def on_disconnect(client, userdata, flags, reason_code, properties=None):
     state["mqtt_connected"] = False
     if _mqtt_down_since is None:
         _mqtt_down_since = time.time()
+    notify_change()
 
 
 def _has_tray_data(ams):
@@ -653,8 +673,8 @@ def on_message(client, userdata, msg):
             current["job_started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
             if prev_state:  # ekte overgang (ikke første melding etter oppstart)
                 current["job_started_epoch"] = time.time()
-                # Hent ny task (bilde + filamentplan) snart, ikke vent på neste minutt-runde
-                threading.Timer(20, fetch_task_covers).start()
+                # Hent ny task (bilde + filamentplan) så fort Bambu har den
+                threading.Thread(target=watch_new_task, args=(dev_id, time.time()), daemon=True).start()
         # Nullstill job_started_at når jobben er ferdig/avbrutt
         elif new_state in ("IDLE", "FAILED", "FINISH") and prev_state in ("RUNNING", "PREPARE", "PAUSE"):
             current["job_started_at"] = None
@@ -673,6 +693,7 @@ def on_message(client, userdata, msg):
         threading.Thread(target=sync_stats_store, daemon=True).start()
 
     state["last_updated"] = time.strftime("%H:%M:%S")
+    notify_change()
 
 
 def _stop_client_locked():
@@ -771,14 +792,34 @@ def fetch_task_covers():
                 }
         state["task_covers"] = {k: v for k, v in covers.items() if v}
         state["latest_tasks"] = latest
+        notify_change()
     except Exception as e:
         print(f"[Feil] Kunne ikke hente task covers: {e}")
+
+
+_cover_watch = set()   # printere vi venter på ny task (forhåndsbilde) for
+
+def watch_new_task(dev_id, started):
+    """Ny jobb startet: spør tasks-API-et tett til den nye tasken (og bildet) dukker opp.
+    Bambu bruker ofte 10–60 s på å registrere den; ellers ville vi ventet på minutt-runden."""
+    if dev_id in _cover_watch:
+        return
+    _cover_watch.add(dev_id)
+    try:
+        for delay in (8, 10, 12, 15, 20, 25, 30, 40, 60):   # ca. 3,5 min totalt
+            time.sleep(delay)
+            fetch_task_covers()
+            task_start = _iso_to_epoch(state.get("latest_tasks", {}).get(dev_id, {}).get("startTime"))
+            if task_start and task_start >= started - 300:
+                return
+    finally:
+        _cover_watch.discard(dev_id)
 
 
 # ── Bygg printer-liste fra devices + MQTT-data ──
 
 STALE_FAIL_S   = 15 * 60  # vis "Feil" i 15 min etter at printen feilet
-STALE_FINISH_S = 5 * 60   # "Ferdig" i 5 min (frontend viser grønn puls de første 2)
+STALE_FINISH_S = 30 * 60  # "Ferdig" (blinker grønt) i 30 min, eller til neste print starter
 
 
 def _iso_to_epoch(iso):
@@ -891,7 +932,8 @@ def build_printer_list():
             "bed_temp": bed_temp,
             "spd_lvl": spd_lvl,
             "ams_colors": ams_colors,
-            "thumbnail": thumbnail,
+            "thumbnail": thumbnail,   # original Bambu-URL (brukes av WP-pluginen)
+            "thumb": f"/api/thumb/{dev_id}/{thumb_key(thumbnail)}" if thumbnail else None,  # nedskalert
         })
 
     return printers
@@ -960,16 +1002,92 @@ def index():
     return render_template("index.html")
 
 
-@app.route("/api/status")
-def api_status():
-    return jsonify({
+def status_payload():
+    return {
         "printers": build_printer_list(),
         "last_updated": state["last_updated"],
         "error": state["error"],
         "needs_verify_code": state["needs_verify_code"],
         "mqtt_connected": state["mqtt_connected"],
         "app_version":    APP_VERSION,
-    })
+    }
+
+
+@app.route("/api/status")
+def api_status():
+    return jsonify(status_payload())
+
+
+STREAM_MIN_INTERVAL = 1.0   # maks én oppdatering i sekundet (MQTT kan sende mange)
+STREAM_KEEPALIVE    = 15    # send status uansett så ofte (fanger også endringer uten varsel)
+
+@app.route("/api/stream")
+def api_stream():
+    """Server-Sent Events: status sendes så snart noe endrer seg, i stedet for at siden spør."""
+    def gen():
+        seen = -1
+        yield "retry: 3000\n\n"
+        while True:
+            with _changed:
+                if _change_seq == seen:
+                    _changed.wait(timeout=STREAM_KEEPALIVE)
+                seen = _change_seq
+            yield "data: " + json.dumps(status_payload(), separators=(",", ":")) + "\n\n"
+            time.sleep(STREAM_MIN_INTERVAL)
+    return Response(gen(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ── Forhåndsbilder: hentes én gang, skaleres ned og caches ──
+THUMB_MAX_PX = 360
+THUMB_CACHE_MAX = 40
+_thumb_cache = OrderedDict()   # nøkkel -> (bytes, mimetype)
+_thumb_lock = threading.Lock()
+
+def thumb_key(url):
+    """Bambu-URL-ene er signerte og får ny query hvert minutt – nøkkel på selve filen."""
+    return hashlib.sha1(url.split("?")[0].encode()).hexdigest()[:12]
+
+def _fetch_thumb(url):
+    resp = requests.get(url, timeout=15)
+    resp.raise_for_status()
+    data = resp.content
+    mime = resp.headers.get("Content-Type", "image/png").split(";")[0]
+    if Image is not None:
+        try:
+            im = Image.open(io.BytesIO(data))
+            im.thumbnail((THUMB_MAX_PX, THUMB_MAX_PX))
+            if im.mode not in ("RGB", "RGBA"):
+                im = im.convert("RGBA")
+            out = io.BytesIO()
+            im.save(out, "WEBP", quality=82)
+            data, mime = out.getvalue(), "image/webp"
+        except Exception as e:
+            print(f"[Bilde] Kunne ikke skalere ned, sender original: {e}")
+    return data, mime
+
+@app.route("/api/thumb/<dev_id>/<key>")
+def api_thumb(dev_id, key):
+    with _thumb_lock:
+        hit = _thumb_cache.get(key)
+        if hit:
+            _thumb_cache.move_to_end(key)
+    if not hit:
+        url = state.get("task_covers", {}).get(dev_id)
+        if not url or thumb_key(url) != key:
+            return "", 404
+        try:
+            hit = _fetch_thumb(url)
+        except Exception as e:
+            print(f"[Bilde] Kunne ikke hente forhåndsbilde: {e}")
+            return "", 502
+        with _thumb_lock:
+            _thumb_cache[key] = hit
+            while len(_thumb_cache) > THUMB_CACHE_MAX:
+                _thumb_cache.popitem(last=False)
+    resp = Response(hit[0], mimetype=hit[1])
+    resp.headers["Cache-Control"] = "public, max-age=86400, immutable"
+    return resp
 
 
 def local_date(iso_utc):
@@ -1126,6 +1244,7 @@ def api_verify():
         fetch_task_covers()
         start_mqtt()
         threading.Thread(target=sync_stats_store, daemon=True).start()
+        notify_change()
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
