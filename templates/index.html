@@ -66,7 +66,7 @@
       transition: border-color .4s;
     }
     .card[data-state="printing"] { --accent: var(--orange); --accent-rgb: 255, 122, 26; }
-    .card[data-state="paused"]   { --accent: var(--amber);  --accent-rgb: 255, 194, 61; }
+    .card[data-state="paused"]   { --accent: var(--amber);  --accent-rgb: 255, 194, 61; border-color: rgba(255, 194, 61, 0.55); }
     .card[data-state="failed"]   { --accent: var(--red);    --accent-rgb: 255, 61, 94; border-color: rgba(255, 61, 94, 0.55); }
     .card[data-state="done"]     { --accent: var(--green);  --accent-rgb: 45, 252, 155; border-color: rgba(45, 252, 155, 0.4); }
     .card[data-state="idle"]     { --accent: var(--cyan);   --accent-rgb: 47, 216, 255; }
@@ -80,24 +80,33 @@
       transform: scaleX(0);
       background: linear-gradient(90deg, rgba(var(--accent-rgb), 0.01), rgba(var(--accent-rgb), 0.065));
       border-right: 1px solid rgba(var(--accent-rgb), 0.35);
-      transition: transform 4.5s linear, opacity .4s;
+      transition: transform .8s ease-out, opacity .4s;
       pointer-events: none;
       opacity: 0;
     }
     .card.has-job .card-fill { opacity: 1; }
 
-    /* Pulserende glød for feil / ferdig */
+    /* Blinkende glød for printere som trenger tilsyn: feil, pauset og ferdig (hent printen).
+       Bare opacity animeres, så det er billig for Pi-en. */
     .card-alert {
       position: absolute;
       inset: -1px;
       border-radius: inherit;
-      box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.7), 0 0 28px rgba(var(--accent-rgb), 0.35), inset 0 0 26px rgba(var(--accent-rgb), 0.12);
+      box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.9), 0 0 36px rgba(var(--accent-rgb), 0.5), inset 0 0 34px rgba(var(--accent-rgb), 0.2);
       opacity: 0;
       pointer-events: none;
     }
-    .card[data-state="failed"] .card-alert { animation: alert-pulse 1.4s ease-in-out infinite; }
-    .card[data-state="done"]   .card-alert { animation: alert-pulse 2.4s ease-in-out infinite; }
-    @keyframes alert-pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
+    .card[data-state="failed"] .card-alert { animation: alert-blink 0.9s ease-in-out infinite; }
+    .card[data-state="paused"] .card-alert { animation: alert-blink 1.4s ease-in-out infinite; }
+    .card[data-state="done"]   .card-alert { animation: alert-blink 2s ease-in-out infinite; }
+    @keyframes alert-blink { 0%, 100% { opacity: 0.1; } 50% { opacity: 1; } }
+    /* Status-chipen blinker i takt, så det synes også på avstand */
+    .card[data-state="failed"] .chip,
+    .card[data-state="paused"] .chip,
+    .card[data-state="done"]   .chip { animation: chip-blink 0.9s steps(1, end) infinite; }
+    .card[data-state="paused"] .chip { animation-duration: 1.4s; }
+    .card[data-state="done"]   .chip { animation-duration: 2s; }
+    @keyframes chip-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
     .card > *:not(.card-fill):not(.card-alert) { position: relative; z-index: 1; }
 
@@ -165,36 +174,23 @@
       max-width: 88%;
       max-height: 92%;
       object-fit: contain;
-      filter: drop-shadow(0 6px 16px rgba(var(--accent-rgb), 0.18));
-      transition: opacity .5s, filter .5s;
+      transition: opacity .5s;
     }
     .card:not(.has-job):not([data-state="done"]) .thumb { opacity: 0.32; filter: grayscale(1); }
 
-    /* ── Hologram: forhåndsbildet vipper rolig og svever mens printeren jobber ── */
-    .card-visual { perspective: 520px; }
+    /* ── Hologram: forhåndsbildet roterer 360° mens printeren jobber ──
+       Kun transform animeres (ingen filter/skygge på det roterende bildet),
+       så nettleseren slipper å tegne bildet på nytt i hver frame. */
+    .card-visual { perspective: 600px; }
     .card[data-state="printing"] .thumb,
     .card[data-state="paused"] .thumb {
-      animation: holo-sway 4.8s ease-in-out var(--holo-delay, 0s) infinite alternate;
+      animation: holo-spin 12s linear var(--holo-delay, 0s) infinite;
       will-change: transform;
     }
     .card[data-state="paused"] .thumb { animation-play-state: paused; }
-    .card[data-state="printing"] .card-visual::after {
-      content: '';
-      position: absolute;
-      left: 0; right: 0; top: 0;
-      height: 35%;
-      background: linear-gradient(180deg, transparent, rgba(var(--accent-rgb), 0.14), transparent);
-      animation: holo-scan 3.4s linear var(--holo-delay, 0s) infinite;
-      pointer-events: none;
-    }
-    @keyframes holo-sway {
-      0%   { transform: rotateY(-26deg) translateY(2px); }
-      50%  { transform: rotateY(0deg)   translateY(-5px); }
-      100% { transform: rotateY(26deg)  translateY(2px); }
-    }
-    @keyframes holo-scan {
-      from { transform: translateY(-100%); }
-      to   { transform: translateY(300%); }
+    @keyframes holo-spin {
+      from { transform: rotateY(0deg); }
+      to   { transform: rotateY(360deg); }
     }
     .card.has-thumb .placeholder { display: none; }
     .placeholder { width: 34%; max-width: 74px; height: auto; color: rgba(var(--accent-rgb), 0.55); }
@@ -253,20 +249,8 @@
       background: linear-gradient(90deg, rgba(var(--accent-rgb), 0.55), var(--accent));
       box-shadow: 0 0 12px var(--accent);
       border-radius: inherit;
-      transition: transform 4.5s linear;
+      transition: transform .8s ease-out;
     }
-    .bar::after {
-      /* lysende "sveip" over baren mens den printer */
-      content: '';
-      position: absolute;
-      top: 0; bottom: 0;
-      width: 30%;
-      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.45), transparent);
-      transform: translateX(-120%);
-      opacity: 0;
-    }
-    .card[data-state="printing"] .bar::after { opacity: 1; animation: sweep 2.6s linear infinite; }
-    @keyframes sweep { to { transform: translateX(420%); } }
     .bar-ticks {
       position: absolute;
       inset: 0;
@@ -458,7 +442,6 @@
 
   const grid = $('#grid');
   const cards = new Map();           // printer id -> card-element
-  const finishedAt = {};             // printer id -> tidspunkt vi så at den ble ferdig
   const seen = new Set();            // printere vi har sett minst én gang
   const alerted = new Set();
   let lastPrinters = [];
@@ -561,13 +544,8 @@
     if (!p.online) return 'offline';
     const s = (p.print_status || '').toUpperCase();
     if (s === 'SUCCESS' || s === 'FINISH') {
-      if (!(p.id in finishedAt)) {
-        // Var den allerede ferdig første gang vi så den, er den ikke "nettopp ferdig".
-        finishedAt[p.id] = seen.has(p.id) ? Date.now() : 0;
-      }
-      return Date.now() - finishedAt[p.id] < 120000 ? 'done' : 'idle';
+      return 'done';  // serveren slipper «ferdig» etter 30 min eller når neste print starter
     }
-    delete finishedAt[p.id];
     if (s === 'RUNNING' || s === 'PRINTING' || s === 'PREPARE') return 'printing';
     if (s === 'PAUSED' || s === 'PAUSE') return 'paused';
     if (s === 'FAIL' || s === 'FAILED') return 'failed';
@@ -581,7 +559,7 @@
   function createCard(id) {
     const el = $('#card-tpl').content.firstElementChild.cloneNode(true);
     el.dataset.dev = id;
-    el.style.setProperty('--holo-delay', -(Math.random() * 9).toFixed(2) + 's');  // ikke i takt
+    el.style.setProperty('--holo-delay', -(Math.random() * 12).toFixed(2) + 's');  // ikke i takt
     el._ = {
       fill: $('.card-fill', el), name: $('.card-name', el), model: $('.card-model', el),
       chip: $('.chip-text', el), thumb: $('.thumb', el),
@@ -628,7 +606,7 @@
     setText(r.model, p.model && p.model !== 'Ukjent' ? p.model : '');
     setText(r.chip, LABEL[state]);
 
-    setThumb(card, p.thumbnail || '');
+    setThumb(card, p.thumb || p.thumbnail || '');  // thumb = nedskalert kopi fra serveren
 
     const job = hasJob && p.task_name ? p.task_name : '';
     setText(r.job, job);
@@ -729,11 +707,25 @@
     } catch (e) {}
   }
 
-  // ── Polling ──
+  // ── Live-strøm (Server-Sent Events) med polling som reserve ──
   let inFlight = false;
   let appVersion = null;  // serverens versjon da siden ble lastet
+  let streamAt = 0;       // sist vi fikk data fra strømmen
+  const STREAM_FRESH_MS = 20000;  // serveren sender minst hvert 15. sekund
+
+  function startStream() {
+    if (DEMO || !window.EventSource) return;
+    const es = new EventSource('/api/stream');  // kobler til på nytt av seg selv
+    es.onmessage = e => {
+      streamAt = Date.now();
+      try { applyStatus(JSON.parse(e.data)); }
+      catch (err) { console.error('Ugyldig data fra strømmen:', err); }
+    };
+  }
+
   async function refresh() {
     if (inFlight) return;
+    if (!DEMO && Date.now() - streamAt < STREAM_FRESH_MS) return;  // strømmen fungerer
     inFlight = true;
     try {
       let data;
@@ -749,55 +741,58 @@
         if (!res.ok) throw new Error('HTTP ' + res.status);
         data = await res.json();
       }
-
-      // Ny app-versjon på serveren (git pull + restart) → last siden på nytt,
-      // så kiosken får nytt design/ny kode uten reboot. Ikke midt i kode-innskriving.
-      if (data.app_version) {
-        if (appVersion && data.app_version !== appVersion && !data.needs_verify_code) {
-          console.info('[dashboard] Ny versjon', data.app_version, '– laster på nytt');
-          location.reload();
-          return;
-        }
-        appVersion = data.app_version;
-      }
-
-      setHidden($('#verify'), !data.needs_verify_code);
-      if (data.needs_verify_code) {
-        setLive('error', 'Venter på kode');
-        setHidden($('#banner'), true);
-        return;
-      }
-
-      const banner = $('#banner');
-      setText(banner, data.error ? (DEMO ? data.error : 'Feil: ' + data.error) : '');
-      banner.classList.toggle('is-warn', DEMO);
-      setHidden(banner, !data.error);
-
-      if (data.mqtt_connected) setLive('live', 'Live' + (data.last_updated ? ' · ' + data.last_updated : ''));
-      else setLive(data.error ? 'error' : '', 'Kobler til…');
-
-      const printers = (data.printers || []).slice().sort((a, b) =>
-        (a.name || '').localeCompare(b.name || '', 'no', { numeric: true, sensitivity: 'base' }));
-
-      printers.forEach(p => {
-        const s = (p.print_status || '').toUpperCase();
-        if (s === 'FAIL' || s === 'FAILED') {
-          // Ikke pip for feil som allerede var der da siden ble lastet
-          if (!alerted.has(p.id)) { alerted.add(p.id); if (seen.has(p.id)) playAlert(); }
-        } else alerted.delete(p.id);
-      });
-
-      lastPrinters = printers;
-      setText($('#empty'), printers.length ? '' : 'Ingen printere funnet.');
-      setHidden($('#empty'), printers.length > 0);
-      applyCards(printers);
-      updateHudStats(printers);
+      applyStatus(data);
     } catch (e) {
       console.error('Kunne ikke hente status:', e);
       setLive('error', 'Ingen kontakt med server');
     } finally {
       inFlight = false;
     }
+  }
+
+  function applyStatus(data) {
+    // Ny app-versjon på serveren (git pull + restart) → last siden på nytt,
+    // så kiosken får nytt design/ny kode uten reboot. Ikke midt i kode-innskriving.
+    if (data.app_version) {
+      if (appVersion && data.app_version !== appVersion && !data.needs_verify_code) {
+        console.info('[dashboard] Ny versjon', data.app_version, '– laster på nytt');
+        location.reload();
+        return;
+      }
+      appVersion = data.app_version;
+    }
+
+    setHidden($('#verify'), !data.needs_verify_code);
+    if (data.needs_verify_code) {
+      setLive('error', 'Venter på kode');
+      setHidden($('#banner'), true);
+      return;
+    }
+
+    const banner = $('#banner');
+    setText(banner, data.error ? (DEMO ? data.error : 'Feil: ' + data.error) : '');
+    banner.classList.toggle('is-warn', DEMO);
+    setHidden(banner, !data.error);
+
+    if (data.mqtt_connected) setLive('live', 'Live' + (data.last_updated ? ' · ' + data.last_updated : ''));
+    else setLive(data.error ? 'error' : '', 'Kobler til…');
+
+    const printers = (data.printers || []).slice().sort((a, b) =>
+      (a.name || '').localeCompare(b.name || '', 'no', { numeric: true, sensitivity: 'base' }));
+
+    printers.forEach(p => {
+      const s = (p.print_status || '').toUpperCase();
+      if (s === 'FAIL' || s === 'FAILED') {
+        // Ikke pip for feil som allerede var der da siden ble lastet
+        if (!alerted.has(p.id)) { alerted.add(p.id); if (seen.has(p.id)) playAlert(); }
+      } else alerted.delete(p.id);
+    });
+
+    lastPrinters = printers;
+    setText($('#empty'), printers.length ? '' : 'Ingen printere funnet.');
+    setHidden($('#empty'), printers.length > 0);
+    applyCards(printers);
+    updateHudStats(printers);
   }
 
   function setLive(kind, text) {
@@ -859,8 +854,10 @@
     const w = (W - gap * (cols - 1)) / cols;
     const h = (H - gap * (rows - 1)) / rows;
     if (w <= 0 || h <= 0) return;
-    grid.style.setProperty('--card-w', Math.floor(w) + 'px');
-    grid.style.setProperty('--card-h', Math.floor(h) - 1 + 'px');  // -1: aldri overflyt pga. avrunding
+    // Skriv bare når størrelsen endres – ellers må alle kortene style-beregnes på nytt hver runde
+    const cw = Math.floor(w) + 'px', ch = Math.floor(h) - 1 + 'px';  // -1: aldri overflyt pga. avrunding
+    if (grid.style.getPropertyValue('--card-w') !== cw) grid.style.setProperty('--card-w', cw);
+    if (grid.style.getPropertyValue('--card-h') !== ch) grid.style.setProperty('--card-h', ch);
   }
 
   function setFit(on) {
@@ -941,6 +938,7 @@
   // ── Start ──
   setFit(KIOSK || lsGet('autoMode') === '1');
   tick();
+  startStream();
   refresh();
   refreshToday();
   setInterval(tick, 1000);
