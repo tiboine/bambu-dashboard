@@ -37,33 +37,118 @@ fi
 unclutter -idle 0.5 -root &
 
 # ── Git-oppdatering ───────────────────────────────────────────────
-echo "Sjekker git-oppdateringer i $REPO_DIR..."
+# Kjøres ved oppstart og deretter jevnlig i bakgrunnen. Når appen restartes med ny
+# kode, laster dashboardet seg selv på nytt – ingen mus, tastatur eller omstart trengs.
+# Endringer i dette skriptet (f.eks. Chromium-flagg) tas i bruk ved neste omstart.
+UPDATE_INTERVAL="${KIOSK_UPDATE_INTERVAL:-600}"   # sekunder mellom hver sjekk (0 = av)
 cd "$REPO_DIR"
-git fetch origin 2>/dev/null
-LOCAL=$(git rev-parse HEAD 2>/dev/null)
-REMOTE=$(git rev-parse origin/master 2>/dev/null || git rev-parse origin/main 2>/dev/null)
 
-if [ -n "$REMOTE" ] && [ "$LOCAL" != "$REMOTE" ]; then
-    echo "Ny versjon funnet – puller oppdateringer..."
-    if git pull --ff-only origin "$(git rev-parse --abbrev-ref HEAD)" 2>/dev/null; then
-        echo "Oppdatering fullført (${LOCAL:0:7} → ${REMOTE:0:7})"
-        # Nye Python-pakker i requirements.txt (appen klarer seg uten dem til de er på plass)
-        if [ -x "$REPO_DIR/.venv/bin/pip" ]; then
-            "$REPO_DIR/.venv/bin/pip" install -q -r "$REPO_DIR/requirements.txt" \
-                && echo "Python-pakker oppdatert" \
-                || echo "Kunne ikke oppdatere Python-pakker – fortsetter"
+PY="$REPO_DIR/.venv/bin/python"
+PIP="$REPO_DIR/.venv/bin/pip"
+STAGE_DIR="${TMPDIR:-/tmp}/bambu-dashboard-test"   # «boblen»: egen kopi av ny versjon
+STAGE_PORT=5099
+SKIP_FILE="$REPO_DIR/.update-skip"                  # versjon som feilet – prøves ikke igjen
+
+# Vent til en adresse svarer (maks $2 sekunder)
+wait_http() {
+    local i
+    for i in $(seq 1 "$2"); do
+        curl -sf -o /dev/null "$1" && return 0
+        sleep 1
+    done
+    return 1
+}
+
+# Test ny versjon i en egen kopi på egen port, uten innlogging, MQTT eller .env.
+# Fanger opp kode som ikke starter (syntaksfeil, manglende pakker, ødelagte sider).
+test_in_bubble() {
+    local commit="$1" pid ok=1
+    rm -rf "$STAGE_DIR"; git worktree prune 2>/dev/null
+    git worktree add -q --detach "$STAGE_DIR" "$commit" 2>/dev/null || return 1
+    # Kiosk-skriptet må også være gyldig, ellers starter ikke Pi-en neste gang
+    if bash -n "$STAGE_DIR/raspberry-pi/start-kiosk.sh"; then
+        [ -x "$PIP" ] && "$PIP" install -q -r "$STAGE_DIR/requirements.txt" >/dev/null 2>&1
+        (cd "$STAGE_DIR" && exec env -i PATH="$PATH" HOME="$HOME" \
+            "$PY" -c "import app; app.app.run(host='127.0.0.1', port=$STAGE_PORT)") >/dev/null 2>&1 &
+        pid=$!
+        if wait_http "http://127.0.0.1:$STAGE_PORT/api/status" 30 \
+            && curl -sf -o /dev/null "http://127.0.0.1:$STAGE_PORT/" \
+            && curl -sf -o /dev/null "http://127.0.0.1:$STAGE_PORT/stats"; then
+            ok=0
         fi
-        # Restart tjenesten kun hvis sudo fungerer uten passord
-        if sudo -n systemctl restart bambu-dashboard 2>/dev/null; then
-            echo "Tjenesten bambu-dashboard restartet"
-        else
-            echo "Kunne ikke restarte tjenesten uten passord – ny versjon tas i bruk ved neste omstart"
-        fi
+        kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
     else
-        echo "Pull feilet – fortsetter med eksisterende versjon"
+        echo "Ny versjon har feil i start-kiosk.sh"
     fi
-else
-    echo "Ingen oppdateringer (${LOCAL:0:7})"
+    git worktree remove --force "$STAGE_DIR" 2>/dev/null; rm -rf "$STAGE_DIR"
+    return $ok
+}
+
+restart_app() {
+    if sudo -n systemctl restart bambu-dashboard 2>/dev/null; then
+        echo "Tjenesten bambu-dashboard restartet"
+        return 0
+    fi
+    echo "Kunne ikke restarte tjenesten uten passord – ny versjon tas i bruk ved neste omstart"
+    return 1
+}
+
+update_repo() {
+    git fetch -q origin 2>/dev/null || { echo "Fikk ikke kontakt med GitHub – prøver igjen senere"; return; }
+    local LOCAL REMOTE
+    LOCAL=$(git rev-parse HEAD 2>/dev/null)
+    REMOTE=$(git rev-parse origin/master 2>/dev/null || git rev-parse origin/main 2>/dev/null)
+    if [ -z "$REMOTE" ] || [ "$LOCAL" = "$REMOTE" ]; then
+        echo "Ingen oppdateringer (${LOCAL:0:7})"
+        return
+    fi
+    if [ "$(cat "$SKIP_FILE" 2>/dev/null)" = "$REMOTE" ]; then
+        echo "Hopper over ${REMOTE:0:7} – den feilet tidligere. Venter på en nyere versjon."
+        return
+    fi
+
+    # 1) Test i boblen før noe endres i den ekte appen
+    echo "Ny versjon ${REMOTE:0:7} – tester den i egen kopi først..."
+    if ! test_in_bubble "$REMOTE"; then
+        echo "Ny versjon ${REMOTE:0:7} startet ikke i testen – beholder ${LOCAL:0:7}"
+        echo "$REMOTE" > "$SKIP_FILE"
+        return
+    fi
+
+    # 2) Bytt til ny versjon
+    if ! git pull -q --ff-only origin "$(git rev-parse --abbrev-ref HEAD)" 2>/dev/null; then
+        echo "Pull feilet – fortsetter med eksisterende versjon"
+        return
+    fi
+    echo "Oppdatert ${LOCAL:0:7} → ${REMOTE:0:7}"
+    [ -x "$PIP" ] && { "$PIP" install -q -r "$REPO_DIR/requirements.txt" || echo "Kunne ikke oppdatere Python-pakker"; }
+    restart_app || return
+
+    # 3) Sjekk at den ekte appen faktisk kom opp – ellers rull tilbake
+    if wait_http "$URL" 90 && curl -sf -o /dev/null "http://localhost:5000/api/status"; then
+        echo "Ny versjon kjører"
+        rm -f "$SKIP_FILE"
+        return
+    fi
+    echo "Ny versjon svarer ikke – ruller tilbake til ${LOCAL:0:7}"
+    echo "$REMOTE" > "$SKIP_FILE"
+    git reset -q --hard "$LOCAL"
+    [ -x "$PIP" ] && "$PIP" install -q -r "$REPO_DIR/requirements.txt" >/dev/null 2>&1
+    restart_app
+}
+
+echo "Sjekker git-oppdateringer i $REPO_DIR..."
+update_repo
+
+# Bakgrunnssjekk mens kiosken kjører. flock hindrer at det startes flere
+# løkker hvis kiosk-skriptet kjøres på nytt uten omstart.
+if [ "$UPDATE_INTERVAL" -gt 0 ] 2>/dev/null && command -v flock >/dev/null 2>&1; then
+    (
+        flock -n 9 || exit 0
+        while sleep "$UPDATE_INTERVAL"; do
+            cd "$REPO_DIR" && update_repo
+        done
+    ) 9>"/tmp/bambu-dashboard-update.lock" >>"/tmp/bambu-dashboard-update.log" 2>&1 &
 fi
 
 # ── Vent til Flask svarer ─────────────────────────────────────────

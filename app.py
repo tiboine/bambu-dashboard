@@ -1251,7 +1251,10 @@ def api_verify():
 
 
 if __name__ == "__main__":
-    init_connection()
-    thread = threading.Thread(target=poll_loop, daemon=True)
-    thread.start()
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    # Innlogging i bakgrunnen: nettsiden svarer med en gang (viser "Kobler til…"),
+    # og oppdateringssjekken på Pi-en kan se at appen faktisk startet.
+    def _startup():
+        init_connection()
+        poll_loop()
+    threading.Thread(target=_startup, daemon=True).start()
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
