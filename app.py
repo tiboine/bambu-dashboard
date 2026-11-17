@@ -43,6 +43,23 @@ APP_BUILD = {
 }
 APP_BUILD["label"] = f"v{APP_BUILD['number']} · {APP_BUILD['commit']}"
 
+UPDATE_STATUS_FILE = Path(__file__).parent / ".update-status"
+UPDATE_STALE_S     = 30 * 60   # ingen sjekk på 30 min → oppdateringsløkka kjører trolig ikke
+
+def update_status():
+    """Siste resultat fra raspberry-pi/auto-update.sh (None hvis den aldri har kjørt her)."""
+    try:
+        ts, st, msg = UPDATE_STATUS_FILE.read_text().strip().split("|", 2)
+        ts = int(ts)
+    except Exception:
+        return None
+    return {
+        "time":  ts,
+        "state": st,                                   # ok / updated / skipped / rolledback / error
+        "message": msg,
+        "stale": time.time() - ts > UPDATE_STALE_S,
+    }
+
 # Endres ved hver restart, så kiosken laster seg selv på nytt
 APP_VERSION = f"{APP_BUILD['commit']}-{int(time.time())}"
 
@@ -1063,6 +1080,7 @@ def status_payload():
         "mqtt_connected": state["mqtt_connected"],
         "app_version":    APP_VERSION,
         "build":          APP_BUILD,
+        "update":         update_status(),
     }
 
 

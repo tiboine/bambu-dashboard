@@ -13,3 +13,5 @@ stats_store.json
 stats_store.json.bak
 stats_store.json.tmp
 .update-skip
+.update-status
+.update-status.tmp

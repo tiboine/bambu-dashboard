@@ -128,6 +128,7 @@ html[data-theme="light"] .hud-header {
   letter-spacing: 0.04em;
   white-space: nowrap;
 }
+.hud-version.is-warn { color: var(--amber); }
 .hud-brand-tag {
   font-size: 0.68rem;
   font-weight: 600;
