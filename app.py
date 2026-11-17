@@ -25,17 +25,26 @@ except ImportError:
 load_dotenv()
 
 app = Flask(__name__)
-def _app_version():
-    """Git-commit + oppstartstid. Endres ved hver restart, så kiosken laster seg selv på nytt."""
+def _git(*args):
     try:
         import subprocess
-        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=Path(__file__).parent,
-                                capture_output=True, text=True, timeout=5).stdout.strip()
+        return subprocess.run(["git", *args], cwd=Path(__file__).parent,
+                              capture_output=True, text=True, timeout=5).stdout.strip()
     except Exception:
-        commit = ""
-    return f"{commit or 'ukjent'}-{int(time.time())}"
+        return ""
 
-APP_VERSION = _app_version()
+# Versjon som vises i dashboardet: antall commits (øker for hver ny versjon) + kort commit-kode
+_commit = _git("rev-parse", "--short", "HEAD")
+_count  = _git("rev-list", "--count", "HEAD")
+APP_BUILD = {
+    "number": _count or "?",
+    "commit": _commit or "ukjent",
+    "date":   _git("log", "-1", "--format=%cd", "--date=format:%d.%m.%Y %H:%M"),
+}
+APP_BUILD["label"] = f"v{APP_BUILD['number']} · {APP_BUILD['commit']}"
+
+# Endres ved hver restart, så kiosken laster seg selv på nytt
+APP_VERSION = f"{APP_BUILD['commit']}-{int(time.time())}"
 
 TOKEN_FILE  = Path(__file__).parent / ".token.json"
 STATS_FILE  = Path(__file__).parent / "stats_store.json"
@@ -1042,7 +1051,7 @@ def poll_loop():
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", build=APP_BUILD)
 
 
 def status_payload():
@@ -1053,6 +1062,7 @@ def status_payload():
         "needs_verify_code": state["needs_verify_code"],
         "mqtt_connected": state["mqtt_connected"],
         "app_version":    APP_VERSION,
+        "build":          APP_BUILD,
     }
 
 
@@ -1211,7 +1221,7 @@ def api_today():
 
 @app.route("/stats")
 def stats_page():
-    return render_template("stats.html")
+    return render_template("stats.html", build=APP_BUILD)
 
 
 @app.route("/api/stats")
