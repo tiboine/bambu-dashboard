@@ -9,6 +9,15 @@ URL="http://localhost:5000/?kiosk=1"   # ?kiosk tvinger tilpass-til-skjerm-modus
 MAX_WAIT=180   # sekunder å vente på Flask (nettverksforbindelse kan ta tid)
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+# ── Logg til fil, så den kan leses på http://<pi>.local:5000/diag ──
+# Ny logg ved hver oppstart; maks 3000 linjer så minnekortet ikke fylles.
+KIOSK_LOG="$REPO_DIR/.kiosk.log"
+CHROMIUM_LOG="$REPO_DIR/.chromium.log"
+if [ -z "$KIOSK_REEXEC" ]; then
+    exec > >(awk 'NR<=3000 { print; fflush() }' > "$KIOSK_LOG") 2>&1
+fi
+echo "[$(date '+%F %T')] Kiosk starter (bruker $(id -un), WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-}, DISPLAY=${DISPLAY:-})"
+
 # ── Deaktiver skjermsparer og strømstyring ────────────────────────
 export DISPLAY="${DISPLAY:-:0}"
 xset s off          2>/dev/null || true
@@ -95,6 +104,7 @@ sed -i 's/"exited_cleanly":false/"exited_cleanly":true/g' \
 sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/g' \
     ~/.config/chromium/Default/Preferences 2>/dev/null || true
 
+echo "[$(date '+%F %T')] Starter $CHROMIUM"
 exec "$CHROMIUM" \
     --kiosk \
     --noerrdialogs \
@@ -114,5 +124,5 @@ exec "$CHROMIUM" \
     --enable-gpu-rasterization \
     --enable-zero-copy \
     --no-sandbox \
-    2>/dev/null \
+    2> >(awk 'NR<=3000 { print; fflush() }' > "$CHROMIUM_LOG") \
     "$URL"

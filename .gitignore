@@ -15,3 +15,5 @@ stats_store.json.tmp
 .update-skip
 .update-status
 .update-status.tmp
+.kiosk.log
+.chromium.log

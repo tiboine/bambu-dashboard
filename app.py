@@ -8,7 +8,11 @@ import threading
 import base64
 import hashlib
 import io
-from collections import OrderedDict
+import logging
+import platform
+import subprocess
+import sys
+from collections import OrderedDict, deque
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 import requests
@@ -23,6 +27,49 @@ except ImportError:
     Image = None
 
 load_dotenv()
+
+# ── Logg i minnet: siste linjer vises på /diag (feilsøking uten SSH) ──
+START_TIME = time.strftime("%d.%m.%Y %H:%M:%S")
+_LOG_LINES = deque(maxlen=400)
+_log_lock  = threading.Lock()
+
+class _LogTee:
+    """Skriver videre til vanlig stdout (journalctl) og tar vare på linjene."""
+    def __init__(self, stream):
+        self.stream, self._buf = stream, ""
+    def write(self, text):
+        try:
+            self.stream.write(text)
+        except Exception:
+            pass
+        with _log_lock:
+            self._buf += text
+            while "\n" in self._buf:
+                line, self._buf = self._buf.split("\n", 1)
+                if line.strip():
+                    _LOG_LINES.append(f"{time.strftime('%d.%m %H:%M:%S')} {line}")
+        return len(text)
+    def flush(self):
+        try:
+            self.stream.flush()
+        except Exception:
+            pass
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+sys.stdout = _LogTee(sys.stdout)
+
+class _LogDequeHandler(logging.Handler):
+    """Advarsler og feil (f.eks. krasj i en side, med traceback) havner også på /diag."""
+    def emit(self, record):
+        try:
+            _LOG_LINES.append(f"{time.strftime('%d.%m %H:%M:%S')} {record.levelname}: {self.format(record)}")
+        except Exception:
+            pass
+
+_h = _LogDequeHandler(level=logging.WARNING)
+_h.setFormatter(logging.Formatter("%(message)s"))
+logging.getLogger().addHandler(_h)
 
 app = Flask(__name__)
 def _git(*args):
@@ -359,7 +406,7 @@ def aggregate_stats(store):
 @app.after_request
 def add_response_headers(response):
     # CORS kun for lese-endepunkter (gammel WP-plugin leser dem fra annet domene)
-    if flask_request.method in ("GET", "HEAD"):
+    if flask_request.method in ("GET", "HEAD") and flask_request.path.startswith("/api/"):
         response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Access-Control-Allow-Methods"] = "GET"
     # Kiosk-Chromium cachet gamle sider – aldri cache HTML
@@ -1107,6 +1154,120 @@ def api_stream():
             time.sleep(STREAM_MIN_INTERVAL)
     return Response(gen(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ── Diagnose: alt som trengs for feilsøking på én side, uten SSH ──
+# Åpne http://<pi-navn>.local:5000/diag fra en annen maskin og kopier teksten.
+# Viser ingen passord, token eller innhold fra .env.
+
+def _cmd(*args, timeout=5):
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return (r.stdout + r.stderr).strip()
+    except Exception as e:
+        return f"(kunne ikke kjøre {args[0]}: {e})"
+
+def _tail(path, n=40):
+    try:
+        lines = Path(path).read_text(errors="replace").splitlines()
+        return "\n".join(lines[-n:]) or "(tom)"
+    except FileNotFoundError:
+        return f"(finnes ikke: {path})"
+    except Exception as e:
+        return f"(kunne ikke lese {path}: {e})"
+
+def _read(path):
+    try:
+        return Path(path).read_text(errors="replace").strip("\x00\n ")
+    except Exception:
+        return ""
+
+def _dns(host, timeout=3):
+    out = {}
+    def look():
+        try:
+            out["ip"] = socket.gethostbyname(host)
+        except Exception as e:
+            out["err"] = str(e)
+    t = threading.Thread(target=look, daemon=True)
+    t.start()
+    t.join(timeout)
+    if "ip" in out:
+        return f"{host}: {out['ip']}"
+    return f"{host}: FEIL ({out.get('err', 'tidsavbrudd')})"
+
+@app.route("/diag")
+def diag():
+    base = Path(__file__).parent
+    parts = []
+    def sec(title, body):
+        parts.append(f"===== {title} =====\n{body}\n")
+
+    sec("Versjon", f"{APP_BUILD['label']} (laget {APP_BUILD['date']})\n"
+                   f"Appen startet: {START_TIME}\n"
+                   f"Python {platform.python_version()} · Pillow: {'ja' if Image else 'nei'}")
+    sec("Klokke", f"Pi-ens klokke nå: {datetime.now().astimezone():%d.%m.%Y %H:%M:%S %Z}")
+
+    u = update_status()
+    if u:
+        when = datetime.fromtimestamp(u["time"]).strftime("%d.%m %H:%M")
+        upd = f"Sist sjekket {when}: [{u['state']}] {u['message']}" + ("  ⚠ GAMMEL – løkka kjører trolig ikke" if u["stale"] else "")
+    else:
+        upd = "Har ikke kjørt"
+    sec("Automatisk oppdatering", upd + "\n--- logg ---\n" + _tail("/tmp/bambu-dashboard-update.log", 30))
+
+    with _state_lock:
+        n_dev = len(state["devices"])
+        n_on = sum(1 for d in state["devices"].values() if d.get("online"))
+    sec("Bambu", f"Innlogget: {'ja' if state['token'] else 'nei'} · Venter på e-postkode: {'ja' if state['needs_verify_code'] else 'nei'}\n"
+                 f"MQTT tilkoblet: {'ja' if state['mqtt_connected'] else 'nei'} · Sist data: {state['last_updated'] or '-'}\n"
+                 f"Printere: {n_dev} ({n_on} online)\nFeilmelding: {state['error'] or '-'}")
+    sec("Nettverk", "\n".join(_dns(h) for h in ("api.bambulab.com", MQTT_BROKER, "github.com")))
+    sec("Git", _cmd("git", "-C", str(base), "status", "-sb") + "\n" + _cmd("git", "-C", str(base), "log", "--oneline", "-5"))
+
+    mem = {}
+    for line in _read("/proc/meminfo").splitlines():
+        k, _, v = line.partition(":")
+        mem[k] = v.strip()
+    try:
+        du = shutil.disk_usage(str(base))
+        disk = f"{du.free / 1e9:.1f} GB ledig av {du.total / 1e9:.1f} GB"
+    except Exception:
+        disk = "?"
+    temp = _read("/sys/class/thermal/thermal_zone0/temp")
+    temp_s = f"{int(temp) / 1000:.1f} °C" if temp.isdigit() else "?"
+    try:
+        up_h = float(_read("/proc/uptime").split()[0]) / 3600
+    except Exception:
+        up_h = 0
+    try:
+        load = " ".join(f"{x:.2f}" for x in os.getloadavg())
+    except Exception:
+        load = "?"
+    sec("System", f"Modell: {_read('/proc/device-tree/model') or platform.machine()}\n"
+                  f"OS: {_read('/etc/os-release').split(chr(10))[0] if _read('/etc/os-release') else platform.platform()}\n"
+                  f"Oppe i: {up_h:.1f} t · Last: {load}\n"
+                  f"Minne: {mem.get('MemAvailable', '?')} ledig av {mem.get('MemTotal', '?')}\n"
+                  f"Disk: {disk}\n"
+                  f"Temperatur: {temp_s}")
+
+    chrom = _cmd("pgrep", "-a", "chromium").splitlines()
+    main = [l for l in chrom if "--type=" not in l]
+    sec("Skjerm og nettleser",
+        f"Chromium-prosesser: {len(chrom)}" + (" – KJØRER IKKE" if not chrom else "") + "\n"
+        + ("\n".join(l[:600] for l in main[:2]) + "\n" if main else "")
+        # Oppdateringsløkka er en bakgrunnskopi av start-kiosk.sh (selve skriptet blir til Chromium)
+        + f"Oppdateringsløkke: {'kjører' if _cmd('pgrep', '-f', 'start-kiosk') else 'KJØRER IKKE'}\n"
+        + f"unclutter: {'kjører' if _cmd('pgrep', '-x', 'unclutter') else 'kjører ikke'}")
+    sec("Kiosk-logg (siste oppstart)", _tail(base / ".kiosk.log", 40))
+    sec("Chromium-logg", _tail(base / ".chromium.log", 40))
+    with _log_lock:
+        app_log = list(_LOG_LINES)[-80:]
+    sec("App-logg (siste 80 linjer)", "\n".join(app_log) or "(tom)")
+
+    resp = Response("\n".join(parts), mimetype="text/plain")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 # ── Forhåndsbilder: hentes én gang, skaleres ned og caches ──
